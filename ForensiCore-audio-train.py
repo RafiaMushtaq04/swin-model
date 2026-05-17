@@ -277,6 +277,14 @@ def inspect_batch_balance(dataset, num_batches=3):
         print(f"Batch {idx + 1} label mean: {float(mean_label):.4f}")
 
 
+def compute_steps_per_epoch(labels, batch_size):
+    labels = np.asarray(labels)
+    real_count = int(np.sum(labels == 0))
+    fake_count = int(np.sum(labels == 1))
+    per_class = min(real_count, fake_count)
+    return max((2 * per_class) // batch_size, 1)
+
+
 def run_audio_pipeline():
     print_stage_banner('Collecting Spectrogram Paths')
     train_paths, train_labels = collect_labeled_paths(TRAIN_DIR, LABELS, IMAGE_EXTS)
@@ -296,14 +304,15 @@ def run_audio_pipeline():
         input_shape,
         BATCH_SIZE,
         seed=RANDOM_STATE,
-    )
+    ).repeat()
     val_ds = build_tf_dataset(val_paths, val_labels, input_shape, BATCH_SIZE)
     test_ds = build_tf_dataset(test_paths, test_labels, input_shape, BATCH_SIZE)
 
     print_stage_banner('Balanced Batch Sanity Check')
     inspect_batch_balance(train_ds, num_batches=3)
 
-    train_batches = (len(train_paths) + BATCH_SIZE - 1) // BATCH_SIZE
+    steps_per_epoch = compute_steps_per_epoch(train_labels, BATCH_SIZE)
+    train_batches = steps_per_epoch
     val_batches = (len(val_paths) + BATCH_SIZE - 1) // BATCH_SIZE
     test_batches = (len(test_paths) + BATCH_SIZE - 1) // BATCH_SIZE
     print(f"Streaming dataset configured with input_shape: {input_shape}")
@@ -354,7 +363,9 @@ def run_audio_pipeline():
     history = model.fit(
         train_ds,
         epochs=EPOCHS,
+        steps_per_epoch=steps_per_epoch,
         validation_data=val_ds,
+        validation_steps=val_batches,
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
     )
 

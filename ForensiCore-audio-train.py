@@ -11,14 +11,14 @@ from ForensiCore import build_audio_model
 MODEL_NAME = 'ForensiCore-Audio'
 NUM_CLASSES = 1
 PATCH_SIZE = (3, 3)
-EMBED_DIM = 64
-NUM_HEADS = 8
+EMBED_DIM = 32
+NUM_HEADS = 4
 WINDOW_SIZE = 2
 SHIFT_SIZE = 1
 NUM_MLP = 256
 QKV_BIAS = True
-DROPOUT_RATE = 0.2
-LEARNING_RATE = 1e-4
+DROPOUT_RATE = 0.25
+LEARNING_RATE = 5e-5
 WEIGHT_DECAY = 5e-4
 LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 16
@@ -35,10 +35,10 @@ IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 LABELS = {'real': 0, 'fake': 1}
 PRINT_EVERY = 5000
 USE_SPEC_AUG = True
-SPEC_AUG_PROB = 0.5
-TIME_MASK_MAX = 16
-FREQ_MASK_MAX = 16
-USE_FOCAL_LOSS = True
+SPEC_AUG_PROB = 0.3
+TIME_MASK_MAX = 12
+FREQ_MASK_MAX = 12
+USE_FOCAL_LOSS = False
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
 
@@ -61,6 +61,22 @@ def print_binary_counts(header, labels):
     real_count = int(np.sum(labels == 0))
     fake_count = int(np.sum(labels == 1))
     print(f"{header}: {real_count} is real and {fake_count} is fake")
+
+
+def print_label_samples(paths, labels, sample_count=3, seed=3):
+    rng = np.random.default_rng(seed)
+    labels = np.asarray(labels)
+
+    for class_id, class_name in [(0, 'real'), (1, 'fake')]:
+        class_idx = np.where(labels == class_id)[0]
+        if len(class_idx) == 0:
+            print(f"Label sample ({class_name}): none found")
+            continue
+
+        picked = rng.choice(class_idx, size=min(sample_count, len(class_idx)), replace=False)
+        print(f"Label sample ({class_name}):")
+        for idx in picked:
+            print(f"- {paths[idx]}")
 
 
 def collect_labeled_paths(root_dir, label_map, image_exts):
@@ -328,6 +344,7 @@ def run_audio_pipeline():
     print_binary_counts('Train (before balancing)', train_labels)
     print_binary_counts('Validation (before balancing)', val_labels)
     print_binary_counts('Test (before balancing)', test_labels)
+    print_label_samples(np.asarray(train_paths), train_labels, sample_count=3, seed=RANDOM_STATE)
 
     print_stage_banner('Building tf.data Pipelines')
     train_ds = build_balanced_train_dataset(

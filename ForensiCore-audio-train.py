@@ -34,6 +34,10 @@ TEST_DIR = str(Path(DATA_ROOT) / 'test')
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 LABELS = {'real': 0, 'fake': 1}
 PRINT_EVERY = 5000
+USE_SPEC_AUG = True
+SPEC_AUG_PROB = 0.7
+TIME_MASK_MAX = 24
+FREQ_MASK_MAX = 24
 
 # Input size control
 # - 'fixed': always resize to FIXED_INPUT_SIZE
@@ -137,20 +141,40 @@ def resolve_input_shape(paths):
     return (chosen_size[0], chosen_size[1], 3)
 
 
-def compute_class_weight(labels):
-    labels = np.asarray(labels)
-    real_count = int(np.sum(labels == 0))
-    fake_count = int(np.sum(labels == 1))
-    total = real_count + fake_count
-    if real_count == 0 or fake_count == 0:
-        raise ValueError('Cannot compute class weights: one class has zero samples.')
+def _apply_spec_augment(image):
+    if tf.random.uniform(()) > SPEC_AUG_PROB:
+        return image
 
-    weight_for_real = total / (2.0 * real_count)
-    weight_for_fake = total / (2.0 * fake_count)
-    return {0: weight_for_real, 1: weight_for_fake}
+    height = tf.shape(image)[0]
+    width = tf.shape(image)[1]
+
+    t = tf.random.uniform((), 0, TIME_MASK_MAX + 1, dtype=tf.int32)
+    f = tf.random.uniform((), 0, FREQ_MASK_MAX + 1, dtype=tf.int32)
+
+    t0 = tf.random.uniform((), 0, tf.maximum(1, width - t + 1), dtype=tf.int32)
+    f0 = tf.random.uniform((), 0, tf.maximum(1, height - f + 1), dtype=tf.int32)
+
+    time_mask = tf.concat(
+        [
+            tf.ones([height, t0, 1], dtype=image.dtype),
+            tf.zeros([height, t, 1], dtype=image.dtype),
+            tf.ones([height, tf.maximum(0, width - t0 - t), 1], dtype=image.dtype),
+        ],
+        axis=1,
+    )
+    freq_mask = tf.concat(
+        [
+            tf.ones([f0, width, 1], dtype=image.dtype),
+            tf.zeros([f, width, 1], dtype=image.dtype),
+            tf.ones([tf.maximum(0, height - f0 - f), width, 1], dtype=image.dtype),
+        ],
+        axis=0,
+    )
+
+    return image * time_mask * freq_mask
 
 
-def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, seed=3):
+def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, seed=3, augment=False):
     target_height, target_width = target_shape[:2]
     paths = np.asarray(paths, dtype=str)
     labels = np.asarray(labels, dtype=np.int32)
@@ -168,6 +192,9 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
         image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
         image = tf.image.resize(image, [target_height, target_width])
         image = tf.cast(image, tf.float32) / 255.0
+        image = tf.image.per_image_standardization(image)
+        if augment and USE_SPEC_AUG:
+            image = _apply_spec_augment(image)
         if NUM_CLASSES == 1:
             label = tf.cast(label, tf.float32)
         else:
@@ -178,6 +205,41 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(AUTOTUNE)
     return dataset
+
+
+def build_balanced_train_dataset(paths, labels, target_shape, batch_size, seed=3):
+    paths = np.asarray(paths, dtype=str)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    real_mask = labels == 0
+    fake_mask = labels == 1
+    if not np.any(real_mask) or not np.any(fake_mask):
+        raise ValueError('Balanced sampling requires both classes to be present.')
+
+    real_ds = build_tf_dataset(
+        paths[real_mask].tolist(),
+        labels[real_mask],
+        target_shape,
+        batch_size,
+        shuffle=True,
+        seed=seed,
+        augment=True,
+    )
+    fake_ds = build_tf_dataset(
+        paths[fake_mask].tolist(),
+        labels[fake_mask],
+        target_shape,
+        batch_size,
+        shuffle=True,
+        seed=seed + 1,
+        augment=True,
+    )
+
+    return tf.data.Dataset.sample_from_datasets(
+        [real_ds, fake_ds],
+        weights=[0.5, 0.5],
+        seed=seed,
+    )
 
 
 def run_audio_pipeline():
@@ -192,16 +254,12 @@ def run_audio_pipeline():
     print_binary_counts('Validation (before balancing)', val_labels)
     print_binary_counts('Test (before balancing)', test_labels)
 
-    class_weight = compute_class_weight(train_labels)
-    print(f"Class weights: {class_weight}")
-
     print_stage_banner('Building tf.data Pipelines')
-    train_ds = build_tf_dataset(
+    train_ds = build_balanced_train_dataset(
         train_paths,
         train_labels,
         input_shape,
         BATCH_SIZE,
-        shuffle=True,
         seed=RANDOM_STATE,
     )
     val_ds = build_tf_dataset(val_paths, val_labels, input_shape, BATCH_SIZE)
@@ -233,7 +291,7 @@ def run_audio_pipeline():
     model.summary()
 
     early_stopping = EarlyStopping(
-        monitor='val_accuracy',
+        monitor='val_auc',
         mode='max',
         patience=5,
         verbose=1,
@@ -241,7 +299,7 @@ def run_audio_pipeline():
     )
     model_checkpoint = ModelCheckpoint(
         f"{MODEL_NAME}-best.keras",
-        monitor='val_accuracy',
+        monitor='val_auc',
         mode='max',
         save_best_only=True,
         verbose=1,
@@ -260,7 +318,6 @@ def run_audio_pipeline():
         epochs=EPOCHS,
         validation_data=val_ds,
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
-        class_weight=class_weight,
     )
 
     best_epoch = int(np.argmax(history.history['val_accuracy']) + 1)

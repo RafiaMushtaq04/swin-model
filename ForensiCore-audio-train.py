@@ -9,7 +9,7 @@ from tensorflow.keras.preprocessing.image import load_img
 from ForensiCore import build_audio_model
 
 MODEL_NAME = 'ForensiCore-Audio'
-NUM_CLASSES = 2
+NUM_CLASSES = 1
 PATCH_SIZE = (3, 3)
 EMBED_DIM = 64
 NUM_HEADS = 8
@@ -20,7 +20,7 @@ QKV_BIAS = True
 DROPOUT_RATE = 0.03
 LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 1e-4
-LABEL_SMOOTHING = 0.02
+LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 16
 EPOCHS = 20
 RANDOM_STATE = 3
@@ -131,22 +131,17 @@ def resolve_input_shape(paths):
     return (chosen_size[0], chosen_size[1], 3)
 
 
-def balance_paths(file_paths, labels, seed=3):
-    rng = np.random.default_rng(seed)
-    real_idx = np.where(labels == 0)[0]
-    fake_idx = np.where(labels == 1)[0]
-    min_count = min(len(real_idx), len(fake_idx))
+def compute_class_weight(labels):
+    labels = np.asarray(labels)
+    real_count = int(np.sum(labels == 0))
+    fake_count = int(np.sum(labels == 1))
+    total = real_count + fake_count
+    if real_count == 0 or fake_count == 0:
+        raise ValueError('Cannot compute class weights: one class has zero samples.')
 
-    if min_count == 0:
-        raise ValueError('Cannot balance data: one class has zero samples.')
-
-    real_bal = rng.choice(real_idx, size=min_count, replace=False)
-    fake_bal = rng.choice(fake_idx, size=min_count, replace=False)
-    balanced_idx = np.concatenate([real_bal, fake_bal])
-    rng.shuffle(balanced_idx)
-
-    file_paths = np.asarray(file_paths)
-    return file_paths[balanced_idx].tolist(), labels[balanced_idx]
+    weight_for_real = total / (2.0 * real_count)
+    weight_for_fake = total / (2.0 * fake_count)
+    return {0: weight_for_real, 1: weight_for_fake}
 
 
 def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, seed=3):
@@ -167,7 +162,10 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
         image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
         image = tf.image.resize(image, [target_height, target_width])
         image = tf.cast(image, tf.float32) / 255.0
-        label = tf.one_hot(label, depth=NUM_CLASSES, dtype=tf.float32)
+        if NUM_CLASSES == 1:
+            label = tf.cast(label, tf.float32)
+        else:
+            label = tf.one_hot(label, depth=NUM_CLASSES, dtype=tf.float32)
         return image, label
 
     dataset = dataset.map(_decode_and_preprocess, num_parallel_calls=AUTOTUNE)
@@ -188,13 +186,8 @@ def run_audio_pipeline():
     print_binary_counts('Validation (before balancing)', val_labels)
     print_binary_counts('Test (before balancing)', test_labels)
 
-    train_paths, train_labels = balance_paths(train_paths, train_labels, seed=RANDOM_STATE)
-    val_paths, val_labels = balance_paths(val_paths, val_labels, seed=RANDOM_STATE + 1)
-    test_paths, test_labels = balance_paths(test_paths, test_labels, seed=RANDOM_STATE + 2)
-
-    print_binary_counts('Train (balanced)', train_labels)
-    print_binary_counts('Validation (balanced)', val_labels)
-    print_binary_counts('Test (balanced)', test_labels)
+    class_weight = compute_class_weight(train_labels)
+    print(f"Class weights: {class_weight}")
 
     print_stage_banner('Building tf.data Pipelines')
     train_ds = build_tf_dataset(
@@ -228,6 +221,7 @@ def run_audio_pipeline():
         learning_rate=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         label_smoothing=LABEL_SMOOTHING,
+        output_activation='sigmoid',
     )
 
     model.summary()
@@ -260,6 +254,7 @@ def run_audio_pipeline():
         epochs=EPOCHS,
         validation_data=val_ds,
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
+        class_weight=class_weight,
     )
 
     best_epoch = int(np.argmax(history.history['val_accuracy']) + 1)
@@ -274,7 +269,7 @@ def run_audio_pipeline():
     test_results = model.evaluate(test_ds, verbose=1)
     test_loss = test_results[0]
     test_acc = test_results[1]
-    test_auc = test_results[2] if len(test_results) > 2 else None
+    test_auc = test_results[4] if len(test_results) > 4 else None
     print(f"Test loss: {test_loss:.4f}")
     print(f"Test accuracy: {test_acc:.4f}")
     if test_auc is not None:

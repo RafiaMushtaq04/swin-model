@@ -217,6 +217,7 @@ def _build_forensicore_model(
     learning_rate=3e-4,
     weight_decay=1e-4,
     label_smoothing=0.02,
+    output_activation=None,
 ):
     del shift_size, num_mlp, qkv_bias
 
@@ -276,7 +277,10 @@ def _build_forensicore_model(
     x = layers.Dense(128, activation="mish")(x)
     x = layers.Dropout(0.2)(x)
 
-    outputs = layers.Dense(num_classes, activation="softmax")(x)
+    if output_activation is None:
+        output_activation = "sigmoid" if num_classes == 1 else "softmax"
+
+    outputs = layers.Dense(num_classes, activation=output_activation)(x)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
     if tfa is not None:
@@ -288,14 +292,22 @@ def _build_forensicore_model(
             learning_rate=learning_rate, weight_decay=weight_decay
         )
 
-    model.compile(
-        loss=keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing),
-        optimizer=optimizer,
-        metrics=[
+    if num_classes == 1:
+        loss_fn = keras.losses.BinaryCrossentropy()
+        metrics = [
+            keras.metrics.BinaryAccuracy(name="accuracy"),
+            keras.metrics.Precision(name="precision"),
+            keras.metrics.Recall(name="recall"),
+            keras.metrics.AUC(name="auc"),
+        ]
+    else:
+        loss_fn = keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing)
+        metrics = [
             keras.metrics.CategoricalAccuracy(name="accuracy"),
             keras.metrics.AUC(name="auc", multi_label=True, num_labels=num_classes),
-        ],
-    )
+        ]
+
+    model.compile(loss=loss_fn, optimizer=optimizer, metrics=metrics)
 
     return model
 

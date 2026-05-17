@@ -9,7 +9,7 @@ from pathlib import Path
 from ForensiCore import build_video_model
 
 MODEL_NAME = 'ForensiCore-Video'
-NUM_CLASSES = 2
+NUM_CLASSES = 1
 PATCH_SIZE = (3, 3)
 EMBED_DIM = 64
 NUM_HEADS = 8
@@ -23,7 +23,7 @@ VALIDATION_SPLIT = 0.15
 TEST_SPLIT = 0.15
 LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 1e-4
-LABEL_SMOOTHING = 0.02
+LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 32
 EPOCHS = 20
 RANDOM_STATE = 3
@@ -145,25 +145,20 @@ def resolve_input_shape(paths):
     return (chosen_size[0], chosen_size[1], 3)
 
 
-def create_balanced_indices(labels, seed=3):
+def compute_class_weight(labels):
     labels = np.asarray(labels)
-    rng = np.random.default_rng(seed)
+    real_count = int(np.sum(labels == 0))
+    fake_count = int(np.sum(labels == 1))
+    total = real_count + fake_count
+    if real_count == 0 or fake_count == 0:
+        raise ValueError('Cannot compute class weights: one class has zero samples.')
 
-    real_idx = np.where(labels == 0)[0]
-    fake_idx = np.where(labels == 1)[0]
-    min_count = min(len(real_idx), len(fake_idx))
-
-    if min_count == 0:
-        raise ValueError('At least one class has 0 samples. Check dataset paths/mappings.')
-
-    real_bal = rng.choice(real_idx, size=min_count, replace=False)
-    fake_bal = rng.choice(fake_idx, size=min_count, replace=False)
-    balanced_idx = np.concatenate([real_bal, fake_bal])
-    rng.shuffle(balanced_idx)
-    return balanced_idx, min_count
+    weight_for_real = total / (2.0 * real_count)
+    weight_for_fake = total / (2.0 * fake_count)
+    return {0: weight_for_real, 1: weight_for_fake}
 
 
-def split_balanced(paths, labels, train_split=0.7, val_split=0.15, seed=3):
+def split_stratified(paths, labels, train_split=0.7, val_split=0.15, seed=3):
     labels = np.asarray(labels)
     if not np.isclose(train_split + val_split + TEST_SPLIT, 1.0):
         raise ValueError('Train/validation/test splits must sum to 1.0')
@@ -171,22 +166,20 @@ def split_balanced(paths, labels, train_split=0.7, val_split=0.15, seed=3):
     rng = np.random.default_rng(seed)
     real_idx = np.where(labels == 0)[0]
     fake_idx = np.where(labels == 1)[0]
-    per_class_count = min(len(real_idx), len(fake_idx))
-
-    if per_class_count == 0:
+    if len(real_idx) == 0 or len(fake_idx) == 0:
         raise ValueError('Cannot split data because one class is empty.')
-
-    real_idx = rng.choice(real_idx, size=per_class_count, replace=False)
-    fake_idx = rng.choice(fake_idx, size=per_class_count, replace=False)
 
     rng.shuffle(real_idx)
     rng.shuffle(fake_idx)
 
-    n_train = int(per_class_count * train_split)
-    n_val = int(per_class_count * val_split)
-    n_test = per_class_count - n_train - n_val
+    def split_counts(class_count):
+        n_train = int(class_count * train_split)
+        n_val = int(class_count * val_split)
+        n_test = class_count - n_train - n_val
+        return n_train, n_val, n_test
 
     def class_split(class_indices):
+        n_train, n_val, n_test = split_counts(len(class_indices))
         train_part = class_indices[:n_train]
         val_part = class_indices[n_train:n_train + n_val]
         test_part = class_indices[n_train + n_val:n_train + n_val + n_test]
@@ -229,7 +222,10 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
         image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
         image = tf.image.resize(image, [target_height, target_width])
         image = tf.cast(image, tf.float32) / 255.0
-        label = tf.one_hot(label, depth=NUM_CLASSES, dtype=tf.float32)
+        if NUM_CLASSES == 1:
+            label = tf.cast(label, tf.float32)
+        else:
+            label = tf.one_hot(label, depth=NUM_CLASSES, dtype=tf.float32)
         return image, label
 
     dataset = dataset.map(_decode_and_preprocess, num_parallel_calls=AUTOTUNE)
@@ -253,18 +249,14 @@ def run_video_pipeline():
 
     print_binary_counts('Collected (before balancing)', all_labels)
 
-    balanced_idx, per_class_balanced = create_balanced_indices(all_labels, seed=RANDOM_STATE)
-    all_paths = list(np.asarray(all_paths)[balanced_idx])
-    all_labels = all_labels[balanced_idx]
-
-    print_binary_counts('Used after global balancing', all_labels)
-    print(f"Balanced per-class sample count: {per_class_balanced}")
+    class_weight = compute_class_weight(all_labels)
+    print(f"Class weights: {class_weight}")
 
     (
         train_paths, y_train_labels,
         val_paths, y_val_labels,
         test_paths, y_test_labels,
-    ) = split_balanced(
+    ) = split_stratified(
         all_paths,
         all_labels,
         train_split=TRAIN_SPLIT,
@@ -310,6 +302,7 @@ def run_video_pipeline():
         learning_rate=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         label_smoothing=LABEL_SMOOTHING,
+        output_activation='sigmoid',
     )
 
     model.summary()
@@ -339,6 +332,7 @@ def run_video_pipeline():
         epochs=EPOCHS,
         validation_data=val_ds,
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
+        class_weight=class_weight,
     )
 
     best_epoch = int(np.argmax(history.history['val_accuracy']) + 1)
@@ -352,7 +346,7 @@ def run_video_pipeline():
     test_results = model.evaluate(test_ds, verbose=1)
     test_loss = test_results[0]
     test_acc = test_results[1]
-    test_auc = test_results[2] if len(test_results) > 2 else None
+    test_auc = test_results[4] if len(test_results) > 4 else None
     print(f"Test loss: {test_loss:.4f}")
     print(f"Test accuracy: {test_acc:.4f}")
     if test_auc is not None:

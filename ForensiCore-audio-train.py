@@ -33,11 +33,12 @@ TEST_DIR = str(Path(DATA_ROOT) / 'test')
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 LABELS = {'real': 0, 'fake': 1}
-PRINT_EVERY = 5000
-USE_SPEC_AUG = True
+PRINT_EVERY = 100000
+USE_SPEC_AUG = False
 SPEC_AUG_PROB = 0.3
 TIME_MASK_MAX = 12
 FREQ_MASK_MAX = 12
+USE_STANDARDIZATION = False
 USE_FOCAL_LOSS = False
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
@@ -211,7 +212,8 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
         image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
         image = tf.image.resize(image, [target_height, target_width])
         image = tf.cast(image, tf.float32) / 255.0
-        image = tf.image.per_image_standardization(image)
+        if USE_STANDARDIZATION:
+            image = tf.image.per_image_standardization(image)
         if augment and USE_SPEC_AUG:
             image = _apply_spec_augment(image)
         if NUM_CLASSES == 1:
@@ -244,7 +246,8 @@ def build_tf_dataset_unbatched(paths, labels, target_shape, shuffle=False, seed=
         image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
         image = tf.image.resize(image, [target_height, target_width])
         image = tf.cast(image, tf.float32) / 255.0
-        image = tf.image.per_image_standardization(image)
+        if USE_STANDARDIZATION:
+            image = tf.image.per_image_standardization(image)
         if augment and USE_SPEC_AUG:
             image = _apply_spec_augment(image)
         if NUM_CLASSES == 1:
@@ -463,6 +466,9 @@ def run_audio_pipeline():
     print(f"Test accuracy: {test_acc:.4f}")
     if test_auc is not None:
         print(f"Test AUC: {test_auc:.4f}")
+
+    print_stage_banner('Label Samples (Repeat)')
+    print_label_samples(np.asarray(train_paths), train_labels, sample_count=3, seed=RANDOM_STATE)
 
     final_model_path = f"{MODEL_NAME}.keras"
     model.save(final_model_path)

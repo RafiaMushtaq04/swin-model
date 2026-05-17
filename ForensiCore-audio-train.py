@@ -33,6 +33,7 @@ TEST_DIR = str(Path(DATA_ROOT) / 'test')
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 LABELS = {'real': 0, 'fake': 1}
+PRINT_EVERY = 5000
 
 # Input size control
 # - 'fixed': always resize to FIXED_INPUT_SIZE
@@ -63,6 +64,7 @@ def collect_labeled_paths(root_dir, label_map, image_exts):
     file_paths = []
     labels = []
 
+    scanned = 0
     for path in root_path.rglob('*'):
         if not path.is_file() or path.suffix.lower() not in image_exts:
             continue
@@ -77,6 +79,10 @@ def collect_labeled_paths(root_dir, label_map, image_exts):
         if matched_label is not None:
             file_paths.append(str(path))
             labels.append(matched_label)
+
+        scanned += 1
+        if scanned % PRINT_EVERY == 0:
+            print(f"Scanned {scanned:,} files in {root_dir}...")
 
     if len(file_paths) == 0:
         raise ValueError(f"No labeled images found in: {root_dir}")

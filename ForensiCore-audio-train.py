@@ -17,8 +17,8 @@ WINDOW_SIZE = 2
 SHIFT_SIZE = 1
 NUM_MLP = 256
 QKV_BIAS = True
-DROPOUT_RATE = 0.03
-LEARNING_RATE = 3e-4
+DROPOUT_RATE = 0.1
+LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 16
@@ -35,9 +35,9 @@ IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 LABELS = {'real': 0, 'fake': 1}
 PRINT_EVERY = 5000
 USE_SPEC_AUG = True
-SPEC_AUG_PROB = 0.7
-TIME_MASK_MAX = 24
-FREQ_MASK_MAX = 24
+SPEC_AUG_PROB = 0.5
+TIME_MASK_MAX = 16
+FREQ_MASK_MAX = 16
 
 # Input size control
 # - 'fixed': always resize to FIXED_INPUT_SIZE
@@ -207,6 +207,36 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
     return dataset
 
 
+def build_tf_dataset_unbatched(paths, labels, target_shape, shuffle=False, seed=3, augment=False):
+    target_height, target_width = target_shape[:2]
+    paths = np.asarray(paths, dtype=str)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
+    if shuffle:
+        dataset = dataset.shuffle(
+            buffer_size=len(paths),
+            seed=seed,
+            reshuffle_each_iteration=True,
+        )
+
+    def _decode_and_preprocess(path, label):
+        image_bytes = tf.io.read_file(path)
+        image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
+        image = tf.image.resize(image, [target_height, target_width])
+        image = tf.cast(image, tf.float32) / 255.0
+        image = tf.image.per_image_standardization(image)
+        if augment and USE_SPEC_AUG:
+            image = _apply_spec_augment(image)
+        if NUM_CLASSES == 1:
+            label = tf.cast(label, tf.float32)
+        else:
+            label = tf.one_hot(label, depth=NUM_CLASSES, dtype=tf.float32)
+        return image, label
+
+    return dataset.map(_decode_and_preprocess, num_parallel_calls=AUTOTUNE)
+
+
 def build_balanced_train_dataset(paths, labels, target_shape, batch_size, seed=3):
     paths = np.asarray(paths, dtype=str)
     labels = np.asarray(labels, dtype=np.int32)
@@ -216,30 +246,35 @@ def build_balanced_train_dataset(paths, labels, target_shape, batch_size, seed=3
     if not np.any(real_mask) or not np.any(fake_mask):
         raise ValueError('Balanced sampling requires both classes to be present.')
 
-    real_ds = build_tf_dataset(
+    real_ds = build_tf_dataset_unbatched(
         paths[real_mask].tolist(),
         labels[real_mask],
         target_shape,
-        batch_size,
         shuffle=True,
         seed=seed,
         augment=True,
     )
-    fake_ds = build_tf_dataset(
+    fake_ds = build_tf_dataset_unbatched(
         paths[fake_mask].tolist(),
         labels[fake_mask],
         target_shape,
-        batch_size,
         shuffle=True,
         seed=seed + 1,
         augment=True,
     )
 
-    return tf.data.Dataset.sample_from_datasets(
+    balanced = tf.data.Dataset.sample_from_datasets(
         [real_ds, fake_ds],
         weights=[0.5, 0.5],
         seed=seed,
     )
+    return balanced.batch(batch_size).prefetch(AUTOTUNE)
+
+
+def inspect_batch_balance(dataset, num_batches=3):
+    for idx, (_, labels) in enumerate(dataset.take(num_batches)):
+        mean_label = tf.reduce_mean(labels)
+        print(f"Batch {idx + 1} label mean: {float(mean_label):.4f}")
 
 
 def run_audio_pipeline():
@@ -264,6 +299,9 @@ def run_audio_pipeline():
     )
     val_ds = build_tf_dataset(val_paths, val_labels, input_shape, BATCH_SIZE)
     test_ds = build_tf_dataset(test_paths, test_labels, input_shape, BATCH_SIZE)
+
+    print_stage_banner('Balanced Batch Sanity Check')
+    inspect_batch_balance(train_ds, num_batches=3)
 
     train_batches = (len(train_paths) + BATCH_SIZE - 1) // BATCH_SIZE
     val_batches = (len(val_paths) + BATCH_SIZE - 1) // BATCH_SIZE

@@ -39,6 +39,9 @@ SPEC_AUG_PROB = 0.3
 TIME_MASK_MAX = 12
 FREQ_MASK_MAX = 12
 USE_STANDARDIZATION = False
+USE_BASELINE = True
+BASELINE_EPOCHS = 5
+BASELINE_SAMPLES_PER_CLASS = 2000
 USE_FOCAL_LOSS = False
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
@@ -78,6 +81,31 @@ def print_label_samples(paths, labels, sample_count=3, seed=3):
         print(f"Label sample ({class_name}):")
         for idx in picked:
             print(f"- {paths[idx]}")
+
+
+def plot_sample_grid(paths, labels, output_path, seed=3, per_class=3):
+    rng = np.random.default_rng(seed)
+    labels = np.asarray(labels)
+
+    fig, axes = plt.subplots(2, per_class, figsize=(3 * per_class, 6))
+    for row, class_id in enumerate([0, 1]):
+        class_idx = np.where(labels == class_id)[0]
+        if len(class_idx) == 0:
+            continue
+        picked = rng.choice(class_idx, size=min(per_class, len(class_idx)), replace=False)
+        for col, idx in enumerate(picked):
+            try:
+                img = load_img(paths[idx])
+                axes[row, col].imshow(img)
+                axes[row, col].axis('off')
+            except Exception:
+                axes[row, col].axis('off')
+
+    axes[0, 0].set_title('real')
+    axes[1, 0].set_title('fake')
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
 
 
 def collect_labeled_paths(root_dir, label_map, image_exts):
@@ -336,6 +364,47 @@ def build_balanced_eval_dataset(paths, labels, target_shape, batch_size, seed=3)
     return dataset, len(balanced_paths)
 
 
+def _sample_per_class(paths, labels, per_class, seed=3):
+    rng = np.random.default_rng(seed)
+    labels = np.asarray(labels)
+    paths = np.asarray(paths)
+
+    real_idx = np.where(labels == 0)[0]
+    fake_idx = np.where(labels == 1)[0]
+    if len(real_idx) == 0 or len(fake_idx) == 0:
+        return paths.tolist(), labels
+
+    real_sel = rng.choice(real_idx, size=min(per_class, len(real_idx)), replace=False)
+    fake_sel = rng.choice(fake_idx, size=min(per_class, len(fake_idx)), replace=False)
+    idx = np.concatenate([real_sel, fake_sel])
+    rng.shuffle(idx)
+    return paths[idx].tolist(), labels[idx]
+
+
+def build_baseline_model(input_shape):
+    inputs = keras.Input(shape=input_shape)
+    x = layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Conv2D(128, 3, padding='same', activation='relu')(x)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(0.3)(x)
+    outputs = layers.Dense(1, activation='sigmoid')(x)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+        loss=keras.losses.BinaryCrossentropy(),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name='accuracy'),
+            keras.metrics.Precision(name='precision'),
+            keras.metrics.Recall(name='recall'),
+            keras.metrics.AUC(name='auc'),
+        ],
+    )
+    return model
+
+
 def run_audio_pipeline():
     print_stage_banner('Collecting Spectrogram Paths')
     train_paths, train_labels = collect_labeled_paths(TRAIN_DIR, LABELS, IMAGE_EXTS)
@@ -348,6 +417,7 @@ def run_audio_pipeline():
     print_binary_counts('Validation (before balancing)', val_labels)
     print_binary_counts('Test (before balancing)', test_labels)
     print_label_samples(np.asarray(train_paths), train_labels, sample_count=3, seed=RANDOM_STATE)
+    plot_sample_grid(train_paths, train_labels, f"{MODEL_NAME}-samples.png", seed=RANDOM_STATE)
 
     print_stage_banner('Building tf.data Pipelines')
     train_ds = build_balanced_train_dataset(
@@ -375,6 +445,39 @@ def run_audio_pipeline():
     test_batches = (len(test_paths) + BATCH_SIZE - 1) // BATCH_SIZE
     print(f"Streaming dataset configured with input_shape: {input_shape}")
     print(f"Train batches: {train_batches}, Validation batches: {val_batches}, Test batches: {test_batches}")
+
+    if USE_BASELINE:
+        print_stage_banner('Baseline Sanity Run')
+        train_paths_small, train_labels_small = _sample_per_class(
+            train_paths, train_labels, BASELINE_SAMPLES_PER_CLASS, seed=RANDOM_STATE
+        )
+        val_paths_small, val_labels_small = _sample_per_class(
+            val_paths, val_labels, BASELINE_SAMPLES_PER_CLASS // 2, seed=RANDOM_STATE + 1
+        )
+
+        train_ds_small = build_tf_dataset(
+            train_paths_small,
+            train_labels_small,
+            input_shape,
+            BATCH_SIZE,
+            shuffle=True,
+            seed=RANDOM_STATE,
+            augment=False,
+        )
+        val_ds_small = build_tf_dataset(
+            val_paths_small,
+            val_labels_small,
+            input_shape,
+            BATCH_SIZE,
+        )
+
+        baseline_model = build_baseline_model(input_shape)
+        baseline_model.summary()
+        baseline_model.fit(
+            train_ds_small,
+            epochs=BASELINE_EPOCHS,
+            validation_data=val_ds_small,
+        )
 
     model = build_audio_model(
         input_shape=input_shape,

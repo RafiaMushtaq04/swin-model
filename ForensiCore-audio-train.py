@@ -17,9 +17,9 @@ WINDOW_SIZE = 2
 SHIFT_SIZE = 1
 NUM_MLP = 256
 QKV_BIAS = True
-DROPOUT_RATE = 0.1
+DROPOUT_RATE = 0.2
 LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 5e-4
 LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 16
 EPOCHS = 20
@@ -38,6 +38,9 @@ USE_SPEC_AUG = True
 SPEC_AUG_PROB = 0.5
 TIME_MASK_MAX = 16
 FREQ_MASK_MAX = 16
+USE_FOCAL_LOSS = True
+FOCAL_ALPHA = 0.25
+FOCAL_GAMMA = 2.0
 
 # Input size control
 # - 'fixed': always resize to FIXED_INPUT_SIZE
@@ -285,6 +288,35 @@ def compute_steps_per_epoch(labels, batch_size):
     return max((2 * per_class) // batch_size, 1)
 
 
+def build_balanced_eval_dataset(paths, labels, target_shape, batch_size, seed=3):
+    paths = np.asarray(paths, dtype=str)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    real_idx = np.where(labels == 0)[0]
+    fake_idx = np.where(labels == 1)[0]
+    if len(real_idx) == 0 or len(fake_idx) == 0:
+        raise ValueError('Balanced evaluation requires both classes in the split.')
+
+    rng = np.random.default_rng(seed)
+    per_class = min(len(real_idx), len(fake_idx))
+    real_sel = rng.choice(real_idx, size=per_class, replace=False)
+    fake_sel = rng.choice(fake_idx, size=per_class, replace=False)
+    balanced_idx = np.concatenate([real_sel, fake_sel])
+    rng.shuffle(balanced_idx)
+
+    balanced_paths = paths[balanced_idx].tolist()
+    balanced_labels = labels[balanced_idx]
+
+    dataset = build_tf_dataset(
+        balanced_paths,
+        balanced_labels,
+        target_shape,
+        batch_size,
+        shuffle=False,
+    )
+    return dataset, len(balanced_paths)
+
+
 def run_audio_pipeline():
     print_stage_banner('Collecting Spectrogram Paths')
     train_paths, train_labels = collect_labeled_paths(TRAIN_DIR, LABELS, IMAGE_EXTS)
@@ -305,7 +337,13 @@ def run_audio_pipeline():
         BATCH_SIZE,
         seed=RANDOM_STATE,
     ).repeat()
-    val_ds = build_tf_dataset(val_paths, val_labels, input_shape, BATCH_SIZE)
+    val_ds, val_count = build_balanced_eval_dataset(
+        val_paths,
+        val_labels,
+        input_shape,
+        BATCH_SIZE,
+        seed=RANDOM_STATE + 1,
+    )
     test_ds = build_tf_dataset(test_paths, test_labels, input_shape, BATCH_SIZE)
 
     print_stage_banner('Balanced Batch Sanity Check')
@@ -313,7 +351,7 @@ def run_audio_pipeline():
 
     steps_per_epoch = compute_steps_per_epoch(train_labels, BATCH_SIZE)
     train_batches = steps_per_epoch
-    val_batches = (len(val_paths) + BATCH_SIZE - 1) // BATCH_SIZE
+    val_batches = (val_count + BATCH_SIZE - 1) // BATCH_SIZE
     test_batches = (len(test_paths) + BATCH_SIZE - 1) // BATCH_SIZE
     print(f"Streaming dataset configured with input_shape: {input_shape}")
     print(f"Train batches: {train_batches}, Validation batches: {val_batches}, Test batches: {test_batches}")
@@ -333,6 +371,28 @@ def run_audio_pipeline():
         weight_decay=WEIGHT_DECAY,
         label_smoothing=LABEL_SMOOTHING,
         output_activation='sigmoid',
+    )
+
+    if USE_FOCAL_LOSS:
+        loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
+            gamma=FOCAL_GAMMA,
+            alpha=FOCAL_ALPHA,
+        )
+    else:
+        loss_fn = tf.keras.losses.BinaryCrossentropy()
+
+    model.compile(
+        optimizer=keras.optimizers.AdamW(
+            learning_rate=LEARNING_RATE,
+            weight_decay=WEIGHT_DECAY,
+        ),
+        loss=loss_fn,
+        metrics=[
+            keras.metrics.BinaryAccuracy(name='accuracy'),
+            keras.metrics.Precision(name='precision'),
+            keras.metrics.Recall(name='recall'),
+            keras.metrics.AUC(name='auc'),
+        ],
     )
 
     model.summary()

@@ -1,3 +1,4 @@
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
@@ -6,6 +7,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.preprocessing.image import load_img
+import librosa
 
 from ForensiCore import build_audio_model
 
@@ -31,6 +33,17 @@ DATA_ROOT = '/kaggle/input/datasets/bishertello/asvspoof-21-df-cqt/my_dataset'
 TRAIN_DIR = str(Path(DATA_ROOT) / 'train')
 VAL_DIR = str(Path(DATA_ROOT) / 'validation')
 TEST_DIR = str(Path(DATA_ROOT) / 'test')
+
+USE_ASVSPOOF_LA = True
+ASVSPOOF_ROOT = '/kaggle/input/datasets/awsaf49/asvpoof-2019-dataset/LA/LA'
+ASVSPOOF_OUTPUT_ROOT = '/kaggle/working/asvspoof_la_mels'
+SUBSET_PER_CLASS = 2000
+SAMPLE_RATE = 16000
+N_MELS = 128
+N_FFT = 1024
+HOP_LENGTH = 256
+MEL_FMIN = 20
+MEL_FMAX = 8000
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 LABELS = {'real': 0, 'fake': 1}
@@ -82,6 +95,119 @@ def print_label_samples(paths, labels, sample_count=3, seed=3):
         print(f"Label sample ({class_name}):")
         for idx in picked:
             print(f"- {paths[idx]}")
+
+
+def _find_protocol_files(protocol_root, split_tag):
+    protocol_root = Path(protocol_root)
+    if not protocol_root.exists():
+        raise FileNotFoundError(f"Protocol root not found: {protocol_root}")
+
+    patterns = [f"*cm*{split_tag}*.txt", f"*{split_tag}*.txt"]
+    files = []
+    for pattern in patterns:
+        files.extend(protocol_root.rglob(pattern))
+
+    return sorted({str(f) for f in files})
+
+
+def _parse_cm_protocol(file_path):
+    items = []
+    with open(file_path, 'r', encoding='utf-8') as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            file_id = parts[1]
+            label = parts[-1].lower()
+            if label not in {'bonafide', 'spoof'}:
+                continue
+            items.append((file_id, label))
+    return items
+
+
+def _load_audio_path(audio_root, file_id):
+    audio_root = Path(audio_root)
+    for ext in ('.flac', '.wav'):
+        candidate = audio_root / f"{file_id}{ext}"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _write_log_mel_png(audio_path, output_path):
+    audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE)
+    mel = librosa.feature.melspectrogram(
+        y=audio,
+        sr=SAMPLE_RATE,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        n_mels=N_MELS,
+        fmin=MEL_FMIN,
+        fmax=MEL_FMAX,
+        power=2.0,
+    )
+    mel_db = librosa.power_to_db(mel, ref=np.max)
+    mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
+    plt.imsave(output_path, mel_norm, cmap='magma')
+
+
+def _prepare_asvspoof_subset():
+    output_root = Path(ASVSPOOF_OUTPUT_ROOT)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    train_out = output_root / 'train'
+    val_out = output_root / 'validation'
+    test_out = output_root / 'test'
+    for split in (train_out, val_out, test_out):
+        (split / 'real').mkdir(parents=True, exist_ok=True)
+        (split / 'fake').mkdir(parents=True, exist_ok=True)
+
+    protocol_root = Path(ASVSPOOF_ROOT) / 'ASVspoof2019_LA_cm_protocols'
+    train_protocols = _find_protocol_files(protocol_root, 'train')
+    dev_protocols = _find_protocol_files(protocol_root, 'dev')
+
+    train_items = []
+    for file_path in train_protocols:
+        train_items.extend(_parse_cm_protocol(file_path))
+
+    dev_items = []
+    for file_path in dev_protocols:
+        dev_items.extend(_parse_cm_protocol(file_path))
+
+    rng = np.random.default_rng(RANDOM_STATE)
+
+    def _select_subset(items):
+        bonafide = [item for item in items if item[1] == 'bonafide']
+        spoof = [item for item in items if item[1] == 'spoof']
+        rng.shuffle(bonafide)
+        rng.shuffle(spoof)
+        bonafide = bonafide[:SUBSET_PER_CLASS]
+        spoof = spoof[:SUBSET_PER_CLASS]
+        return bonafide + spoof
+
+    train_subset = _select_subset(train_items)
+    dev_subset = _select_subset(dev_items)
+
+    audio_train_root = Path(ASVSPOOF_ROOT) / 'ASVspoof2019_LA_train'
+    audio_dev_root = Path(ASVSPOOF_ROOT) / 'ASVspoof2019_LA_dev'
+
+    def _export_split(items, audio_root, out_root):
+        for file_id, label in items:
+            audio_path = _load_audio_path(audio_root, file_id)
+            if audio_path is None:
+                continue
+            class_dir = 'real' if label == 'bonafide' else 'fake'
+            output_path = out_root / class_dir / f"{file_id}.png"
+            if output_path.exists():
+                continue
+            _write_log_mel_png(audio_path, str(output_path))
+
+    _export_split(train_subset, audio_train_root, train_out)
+    _export_split(dev_subset, audio_dev_root, val_out)
+
+    return str(output_root)
 
 
 def plot_sample_grid(paths, labels, output_path, seed=3, per_class=3):
@@ -407,10 +533,21 @@ def build_baseline_model(input_shape):
 
 
 def run_audio_pipeline():
+    if USE_ASVSPOOF_LA:
+        print_stage_banner('Preparing ASVspoof LA Subset')
+        data_root = _prepare_asvspoof_subset()
+        train_dir = str(Path(data_root) / 'train')
+        val_dir = str(Path(data_root) / 'validation')
+        test_dir = str(Path(data_root) / 'test')
+    else:
+        train_dir = TRAIN_DIR
+        val_dir = VAL_DIR
+        test_dir = TEST_DIR
+
     print_stage_banner('Collecting Spectrogram Paths')
-    train_paths, train_labels = collect_labeled_paths(TRAIN_DIR, LABELS, IMAGE_EXTS)
-    val_paths, val_labels = collect_labeled_paths(VAL_DIR, LABELS, IMAGE_EXTS)
-    test_paths, test_labels = collect_labeled_paths(TEST_DIR, LABELS, IMAGE_EXTS)
+    train_paths, train_labels = collect_labeled_paths(train_dir, LABELS, IMAGE_EXTS)
+    val_paths, val_labels = collect_labeled_paths(val_dir, LABELS, IMAGE_EXTS)
+    test_paths, test_labels = collect_labeled_paths(test_dir, LABELS, IMAGE_EXTS)
 
     input_shape = resolve_input_shape(train_paths)
 

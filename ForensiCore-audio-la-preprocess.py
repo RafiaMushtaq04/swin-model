@@ -6,6 +6,7 @@ import random
 import librosa
 import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 
 
 DEFAULT_ROOT = "/kaggle/input/datasets/awsaf49/asvpoof-2019-dataset/LA/LA"
@@ -97,11 +98,39 @@ def process_split(root_dir, split_dir, protocol_path, out_dir, subset_per_class=
         save_png(log_mel, output_path)
 
 
+def preview_samples(out_dir, per_class=3, seed=3):
+    rng = random.Random(seed)
+    fig, axes = plt.subplots(2, per_class, figsize=(3 * per_class, 6))
+
+    for row, label_dir in enumerate(["real", "fake"]):
+        class_dir = Path(out_dir) / label_dir
+        candidates = list(class_dir.glob("*.png"))
+        if not candidates:
+            continue
+        picks = rng.sample(candidates, min(per_class, len(candidates)))
+        for col, path in enumerate(picks):
+            try:
+                img = Image.open(path)
+                axes[row, col].imshow(img)
+                axes[row, col].axis("off")
+            except Exception:
+                axes[row, col].axis("off")
+
+    axes[0, 0].set_title("real")
+    axes[1, 0].set_title("fake")
+    fig.tight_layout()
+    fig.savefig(Path(out_dir) / "preview_grid.png")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Preprocess ASVspoof2019 LA into PNG log-mel")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out", default=DEFAULT_OUT)
-    parser.add_argument("--subset-per-class", type=int, default=0)
+    parser.add_argument("--train-per-class", type=int, default=10000)
+    parser.add_argument("--dev-per-class", type=int, default=2000)
+    parser.add_argument("--eval-per-class", type=int, default=2000)
+    parser.add_argument("--preview", action="store_true")
     parser.add_argument("--seed", type=int, default=3)
     args = parser.parse_args()
 
@@ -125,7 +154,7 @@ def main():
         "ASVspoof2019_LA_train",
         train_protocol,
         Path(out_dir) / "train",
-        subset_per_class=args.subset_per_class if args.subset_per_class > 0 else None,
+        subset_per_class=args.train_per_class,
         seed=args.seed,
     )
 
@@ -135,7 +164,7 @@ def main():
         "ASVspoof2019_LA_dev",
         dev_protocol,
         Path(out_dir) / "validation",
-        subset_per_class=max(1, args.subset_per_class // 2) if args.subset_per_class > 0 else None,
+        subset_per_class=args.dev_per_class,
         seed=args.seed + 1,
     )
 
@@ -145,9 +174,13 @@ def main():
         "ASVspoof2019_LA_eval",
         eval_protocol,
         Path(out_dir) / "test",
-        subset_per_class=max(1, args.subset_per_class // 2) if args.subset_per_class > 0 else None,
+        subset_per_class=args.eval_per_class,
         seed=args.seed + 2,
     )
+
+    if args.preview:
+        print("Saving preview grid...")
+        preview_samples(Path(out_dir) / "train", per_class=3, seed=args.seed)
 
     print("Preprocessing complete.")
     print(f"Output dir: {out_dir}")

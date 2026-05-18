@@ -35,6 +35,13 @@ def read_protocol(protocol_path):
     return entries
 
 
+def summarize_protocol(protocol_path):
+    entries = read_protocol(protocol_path)
+    real_count = sum(1 for _, label in entries if label == "bonafide")
+    fake_count = sum(1 for _, label in entries if label == "spoof")
+    return real_count, fake_count
+
+
 def find_audio_path(root_dir, split_dir, file_id):
     for ext in (".flac", ".wav"):
         candidate = Path(root_dir) / split_dir / "flac" / f"{file_id}{ext}"
@@ -131,6 +138,7 @@ def main():
     parser.add_argument("--dev-per-class", type=int, default=2000)
     parser.add_argument("--eval-per-class", type=int, default=2000)
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--seed", type=int, default=3)
     args = parser.parse_args()
 
@@ -147,6 +155,17 @@ def main():
         raise FileNotFoundError(f"Missing dev protocol: {dev_protocol}")
     if not eval_protocol.exists():
         raise FileNotFoundError(f"Missing eval protocol: {eval_protocol}")
+
+    train_real, train_fake = summarize_protocol(train_protocol)
+    dev_real, dev_fake = summarize_protocol(dev_protocol)
+    eval_real, eval_fake = summarize_protocol(eval_protocol)
+    print("Protocol summary (bonafide vs spoof):")
+    print(f"- train: {train_real} real, {train_fake} fake")
+    print(f"- dev:   {dev_real} real, {dev_fake} fake")
+    print(f"- eval:  {eval_real} real, {eval_fake} fake")
+
+    if args.summary_only:
+        return
 
     print("Preprocessing train split...")
     process_split(

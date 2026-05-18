@@ -163,11 +163,18 @@ def build_balanced_eval_dataset(paths, labels, target_shape, batch_size, seed=3)
 def run_audio_pipeline(data_root):
     train_paths, train_labels = collect_labeled_paths(Path(data_root) / "train")
     val_paths, val_labels = collect_labeled_paths(Path(data_root) / "validation")
+    test_root = Path(data_root) / "test"
+    test_paths = []
+    test_labels = np.asarray([])
+    if test_root.exists():
+        test_paths, test_labels = collect_labeled_paths(test_root)
 
     input_shape = (224, 224, 3)
 
     print_binary_counts("Train (before balancing)", train_labels)
     print_binary_counts("Validation (before balancing)", val_labels)
+    if len(test_paths) > 0:
+        print_binary_counts("Test (before balancing)", test_labels)
 
     print_stage_banner("Building tf.data Pipelines")
     train_ds = build_balanced_train_dataset(
@@ -251,6 +258,22 @@ def run_audio_pipeline(data_root):
 
     print_stage_banner("Training Summary")
     print(f"Best val_auc: {np.max(history.history['val_auc']):.4f}")
+
+    if len(test_paths) > 0:
+        print_stage_banner("Test Evaluation")
+        test_ds = build_tf_dataset(
+            test_paths,
+            test_labels,
+            input_shape,
+            BATCH_SIZE,
+            shuffle=False,
+        )
+        test_results = model.evaluate(test_ds, verbose=1)
+        print(f"Test loss: {test_results[0]:.4f}")
+        print(f"Test accuracy: {test_results[1]:.4f}")
+        print(f"Test precision: {test_results[2]:.4f}")
+        print(f"Test recall: {test_results[3]:.4f}")
+        print(f"Test AUC: {test_results[4]:.4f}")
 
 
 def main():

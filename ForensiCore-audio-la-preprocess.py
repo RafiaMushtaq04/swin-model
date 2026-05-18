@@ -80,7 +80,7 @@ def process_split(root_dir, split_dir, protocol_path, out_dir, subset_per_class=
     real = [e for e in entries if e[1] == "bonafide"]
     fake = [e for e in entries if e[1] == "spoof"]
 
-    if subset_per_class is not None:
+    if subset_per_class is not None and subset_per_class > 0:
         real = rng.sample(real, min(subset_per_class, len(real)))
         fake = rng.sample(fake, min(subset_per_class, len(fake)))
 
@@ -101,7 +101,7 @@ def main():
     parser = argparse.ArgumentParser(description="Preprocess ASVspoof2019 LA into PNG log-mel")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out", default=DEFAULT_OUT)
-    parser.add_argument("--subset-per-class", type=int, default=2000)
+    parser.add_argument("--subset-per-class", type=int, default=0)
     parser.add_argument("--seed", type=int, default=3)
     args = parser.parse_args()
 
@@ -110,11 +110,14 @@ def main():
 
     train_protocol = Path(root_dir) / "ASVspoof2019_LA_cm_protocols" / "ASVspoof2019.LA.cm.train.trn.txt"
     dev_protocol = Path(root_dir) / "ASVspoof2019_LA_cm_protocols" / "ASVspoof2019.LA.cm.dev.trl.txt"
+    eval_protocol = Path(root_dir) / "ASVspoof2019_LA_cm_protocols" / "ASVspoof2019.LA.cm.eval.trl.txt"
 
     if not train_protocol.exists():
         raise FileNotFoundError(f"Missing train protocol: {train_protocol}")
     if not dev_protocol.exists():
         raise FileNotFoundError(f"Missing dev protocol: {dev_protocol}")
+    if not eval_protocol.exists():
+        raise FileNotFoundError(f"Missing eval protocol: {eval_protocol}")
 
     print("Preprocessing train split...")
     process_split(
@@ -122,7 +125,7 @@ def main():
         "ASVspoof2019_LA_train",
         train_protocol,
         Path(out_dir) / "train",
-        subset_per_class=args.subset_per_class,
+        subset_per_class=args.subset_per_class if args.subset_per_class > 0 else None,
         seed=args.seed,
     )
 
@@ -132,8 +135,18 @@ def main():
         "ASVspoof2019_LA_dev",
         dev_protocol,
         Path(out_dir) / "validation",
-        subset_per_class=max(1, args.subset_per_class // 2),
+        subset_per_class=max(1, args.subset_per_class // 2) if args.subset_per_class > 0 else None,
         seed=args.seed + 1,
+    )
+
+    print("Preprocessing eval split...")
+    process_split(
+        root_dir,
+        "ASVspoof2019_LA_eval",
+        eval_protocol,
+        Path(out_dir) / "test",
+        subset_per_class=max(1, args.subset_per_class // 2) if args.subset_per_class > 0 else None,
+        seed=args.seed + 2,
     )
 
     print("Preprocessing complete.")

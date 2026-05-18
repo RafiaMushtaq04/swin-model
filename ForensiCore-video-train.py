@@ -17,12 +17,12 @@ WINDOW_SIZE = 2
 SHIFT_SIZE = 1
 NUM_MLP = 256
 QKV_BIAS = True
-DROPOUT_RATE = 0.1
+DROPOUT_RATE = 0.15
 TRAIN_SPLIT = 0.7
 VALIDATION_SPLIT = 0.15
 TEST_SPLIT = 0.15
 LEARNING_RATE = 3e-4
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 2e-4
 LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 32
 EPOCHS = 20
@@ -33,6 +33,8 @@ AUGMENT_TRAIN = True
 AUGMENT_PROB = 0.6
 BRIGHTNESS_DELTA = 0.1
 CONTRAST_RANGE = (0.8, 1.2)
+JPEG_QUALITY_RANGE = (70, 100)
+BLUR_PROB = 0.2
 
 # Input size control
 # - 'fixed': always resize to FIXED_INPUT_SIZE
@@ -325,12 +327,14 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
             reshuffle_each_iteration=True,
         )
 
+    def _apply_blur(image):
+        return tf.nn.avg_pool2d(image[None, ...], ksize=3, strides=1, padding='SAME')[0]
+
     def _decode_and_preprocess(path, label):
         image_bytes = tf.io.read_file(path)
         image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
         image = tf.image.resize(image, [target_height, target_width])
         image = tf.cast(image, tf.float32) / 255.0
-        image = tf.image.per_image_standardization(image)
         if shuffle and AUGMENT_TRAIN:
             if tf.random.uniform(()) < AUGMENT_PROB:
                 image = tf.image.random_flip_left_right(image)
@@ -338,6 +342,16 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
                 image = tf.image.random_brightness(image, max_delta=BRIGHTNESS_DELTA)
             if tf.random.uniform(()) < AUGMENT_PROB:
                 image = tf.image.random_contrast(image, CONTRAST_RANGE[0], CONTRAST_RANGE[1])
+            if tf.random.uniform(()) < AUGMENT_PROB:
+                image_uint8 = tf.cast(tf.clip_by_value(image * 255.0, 0.0, 255.0), tf.uint8)
+                image_uint8 = tf.image.random_jpeg_quality(
+                    image_uint8, JPEG_QUALITY_RANGE[0], JPEG_QUALITY_RANGE[1]
+                )
+                image = tf.cast(image_uint8, tf.float32) / 255.0
+            if tf.random.uniform(()) < BLUR_PROB:
+                image = _apply_blur(image)
+
+        image = tf.image.per_image_standardization(image)
         if NUM_CLASSES == 1:
             label = tf.cast(label, tf.float32)
         else:
@@ -410,6 +424,12 @@ def run_video_pipeline():
     print(f"Streaming dataset configured with input_shape: {input_shape}")
     print(f"Train batches: {train_batches}, Validation batches: {val_batches}, Test batches: {test_batches}")
 
+    lr_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=LEARNING_RATE,
+        decay_steps=max(train_batches * EPOCHS, 1),
+        alpha=0.1,
+    )
+
     model = build_video_model(
         input_shape=input_shape,
         num_classes=NUM_CLASSES,
@@ -421,7 +441,7 @@ def run_video_pipeline():
         num_mlp=NUM_MLP,
         qkv_bias=QKV_BIAS,
         dropout_rate=DROPOUT_RATE,
-        learning_rate=LEARNING_RATE,
+        learning_rate=lr_schedule,
         weight_decay=WEIGHT_DECAY,
         label_smoothing=LABEL_SMOOTHING,
         output_activation='sigmoid',

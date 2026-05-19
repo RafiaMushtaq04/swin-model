@@ -143,12 +143,22 @@ def _frame_indices(frame_count, frames_per_video):
     return [int(step * i) for i in range(frames_per_video)]
 
 
-def extract_frames(video_path, output_dir, frames_per_video):
+def _resolve_frames_per_video(frame_count, fps, frames_per_video, frames_per_second):
+    if frames_per_second and fps > 0:
+        duration = frame_count / fps if frame_count > 0 else 0
+        if duration > 0:
+            return max(1, int(round(duration * frames_per_second)))
+    return frames_per_video
+
+
+def extract_frames(video_path, output_dir, frames_per_video, frames_per_second):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return 0
 
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    target_frames = _resolve_frames_per_video(frame_count, fps, frames_per_video, frames_per_second)
     if frame_count <= 0:
         frames = []
         while True:
@@ -158,7 +168,7 @@ def extract_frames(video_path, output_dir, frames_per_video):
             frames.append(frame)
         cap.release()
         frame_count = len(frames)
-        indices = _frame_indices(frame_count, frames_per_video)
+        indices = _frame_indices(frame_count, target_frames)
         saved = 0
         for idx, frame_idx in enumerate(indices):
             frame = frames[frame_idx]
@@ -167,7 +177,7 @@ def extract_frames(video_path, output_dir, frames_per_video):
             saved += 1
         return saved
 
-    indices = _frame_indices(frame_count, frames_per_video)
+    indices = _frame_indices(frame_count, target_frames)
     saved = 0
     for idx, frame_idx in enumerate(indices):
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -182,7 +192,7 @@ def extract_frames(video_path, output_dir, frames_per_video):
     return saved
 
 
-def process_split(items, split_dir, out_root, frames_per_video, max_per_class, seed):
+def process_split(items, split_dir, out_root, frames_per_video, frames_per_second, max_per_class, seed):
     items = _sample_per_class(items, max_per_class, seed)
     if not items:
         return 0
@@ -194,7 +204,7 @@ def process_split(items, split_dir, out_root, frames_per_video, max_per_class, s
         output_dir = Path(out_root) / split_dir / label_dir
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        processed += extract_frames(video_path, output_dir, frames_per_video)
+        processed += extract_frames(video_path, output_dir, frames_per_video, frames_per_second)
 
     return processed
 
@@ -207,6 +217,7 @@ def main():
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--test-split", type=float, default=0.1)
     parser.add_argument("--frames-per-video", type=int, default=8)
+    parser.add_argument("--frames-per-second", type=float, default=2.0)
     parser.add_argument("--max-videos-per-class", type=int, default=0)
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--seed", type=int, default=3)
@@ -241,6 +252,7 @@ def main():
         "train",
         out_root,
         args.frames_per_video,
+        args.frames_per_second,
         args.max_videos_per_class,
         args.seed,
     )
@@ -250,6 +262,7 @@ def main():
         "validation",
         out_root,
         args.frames_per_video,
+        args.frames_per_second,
         args.max_videos_per_class,
         args.seed + 1,
     )
@@ -259,6 +272,7 @@ def main():
         "test",
         out_root,
         args.frames_per_video,
+        args.frames_per_second,
         args.max_videos_per_class,
         args.seed + 2,
     )

@@ -1,77 +1,46 @@
-import os
+import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
-from tensorflow.keras.preprocessing.image import load_img
-import librosa
 
 from ForensiCore import build_audio_model
 
-MODEL_NAME = 'ForensiCore-Audio'
+MODEL_NAME = "ForensiCore-FakeAV-Audio"
 NUM_CLASSES = 1
 PATCH_SIZE = (3, 3)
-EMBED_DIM = 32
+EMBED_DIM = 64
 NUM_HEADS = 4
 WINDOW_SIZE = 2
 SHIFT_SIZE = 1
 NUM_MLP = 256
 QKV_BIAS = True
-DROPOUT_RATE = 0.25
-LEARNING_RATE = 5e-5
-WEIGHT_DECAY = 5e-4
+DROPOUT_RATE = 0.2
+LEARNING_RATE = 3e-4
+WEIGHT_DECAY = 2e-4
 LABEL_SMOOTHING = 0.0
 BATCH_SIZE = 16
 EPOCHS = 20
 RANDOM_STATE = 3
 AUTOTUNE = tf.data.AUTOTUNE
 
-DATA_ROOT = '/kaggle/input/datasets/bishertello/asvspoof-21-df-cqt/my_dataset'
-TRAIN_DIR = str(Path(DATA_ROOT) / 'train')
-VAL_DIR = str(Path(DATA_ROOT) / 'validation')
-TEST_DIR = str(Path(DATA_ROOT) / 'test')
+DEFAULT_DATA_ROOT = "/kaggle/working/fakeav_audio_png"
 
-USE_ASVSPOOF_LA = True
-ASVSPOOF_ROOT = '/kaggle/input/datasets/awsaf49/asvpoof-2019-dataset/LA/LA'
-ASVSPOOF_OUTPUT_ROOT = '/kaggle/working/asvspoof_la_mels'
-SUBSET_PER_CLASS = 2000
-SAMPLE_RATE = 16000
-N_MELS = 128
-N_FFT = 1024
-HOP_LENGTH = 256
-MEL_FMIN = 20
-MEL_FMAX = 8000
-
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
-LABELS = {'real': 0, 'fake': 1}
-PRINT_EVERY = 100000
+IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+LABELS = {"real": 0, "fake": 1}
 USE_SPEC_AUG = False
 SPEC_AUG_PROB = 0.3
 TIME_MASK_MAX = 12
 FREQ_MASK_MAX = 12
 USE_STANDARDIZATION = False
-USE_BASELINE = True
-BASELINE_EPOCHS = 5
-BASELINE_SAMPLES_PER_CLASS = 2000
-USE_FOCAL_LOSS = False
-FOCAL_ALPHA = 0.25
-FOCAL_GAMMA = 2.0
-
-# Input size control
-# - 'fixed': always resize to FIXED_INPUT_SIZE
-# - 'auto': scan training images and select most common size
-INPUT_SIZE_MODE = 'fixed'
-FIXED_INPUT_SIZE = (224, 224)
-SIZE_SCAN_MAX_SAMPLES = 3000
 
 
 def print_stage_banner(title):
-    print('\n' + '=' * 70)
+    print("\n" + "=" * 70)
     print(title)
-    print('=' * 70)
+    print("=" * 70)
 
 
 def print_binary_counts(header, labels):
@@ -85,7 +54,7 @@ def print_label_samples(paths, labels, sample_count=3, seed=3):
     rng = np.random.default_rng(seed)
     labels = np.asarray(labels)
 
-    for class_id, class_name in [(0, 'real'), (1, 'fake')]:
+    for class_id, class_name in [(0, "real"), (1, "fake")]:
         class_idx = np.where(labels == class_id)[0]
         if len(class_idx) == 0:
             print(f"Label sample ({class_name}): none found")
@@ -95,119 +64,6 @@ def print_label_samples(paths, labels, sample_count=3, seed=3):
         print(f"Label sample ({class_name}):")
         for idx in picked:
             print(f"- {paths[idx]}")
-
-
-def _find_protocol_files(protocol_root, split_tag):
-    protocol_root = Path(protocol_root)
-    if not protocol_root.exists():
-        raise FileNotFoundError(f"Protocol root not found: {protocol_root}")
-
-    patterns = [f"*cm*{split_tag}*.txt", f"*{split_tag}*.txt"]
-    files = []
-    for pattern in patterns:
-        files.extend(protocol_root.rglob(pattern))
-
-    return sorted({str(f) for f in files})
-
-
-def _parse_cm_protocol(file_path):
-    items = []
-    with open(file_path, 'r', encoding='utf-8') as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            parts = line.strip().split()
-            if len(parts) < 2:
-                continue
-            file_id = parts[1]
-            label = parts[-1].lower()
-            if label not in {'bonafide', 'spoof'}:
-                continue
-            items.append((file_id, label))
-    return items
-
-
-def _load_audio_path(audio_root, file_id):
-    audio_root = Path(audio_root)
-    for ext in ('.flac', '.wav'):
-        candidate = audio_root / f"{file_id}{ext}"
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
-def _write_log_mel_png(audio_path, output_path):
-    audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE)
-    mel = librosa.feature.melspectrogram(
-        y=audio,
-        sr=SAMPLE_RATE,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        fmin=MEL_FMIN,
-        fmax=MEL_FMAX,
-        power=2.0,
-    )
-    mel_db = librosa.power_to_db(mel, ref=np.max)
-    mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
-    plt.imsave(output_path, mel_norm, cmap='magma')
-
-
-def _prepare_asvspoof_subset():
-    output_root = Path(ASVSPOOF_OUTPUT_ROOT)
-    output_root.mkdir(parents=True, exist_ok=True)
-
-    train_out = output_root / 'train'
-    val_out = output_root / 'validation'
-    test_out = output_root / 'test'
-    for split in (train_out, val_out, test_out):
-        (split / 'real').mkdir(parents=True, exist_ok=True)
-        (split / 'fake').mkdir(parents=True, exist_ok=True)
-
-    protocol_root = Path(ASVSPOOF_ROOT) / 'ASVspoof2019_LA_cm_protocols'
-    train_protocols = _find_protocol_files(protocol_root, 'train')
-    dev_protocols = _find_protocol_files(protocol_root, 'dev')
-
-    train_items = []
-    for file_path in train_protocols:
-        train_items.extend(_parse_cm_protocol(file_path))
-
-    dev_items = []
-    for file_path in dev_protocols:
-        dev_items.extend(_parse_cm_protocol(file_path))
-
-    rng = np.random.default_rng(RANDOM_STATE)
-
-    def _select_subset(items):
-        bonafide = [item for item in items if item[1] == 'bonafide']
-        spoof = [item for item in items if item[1] == 'spoof']
-        rng.shuffle(bonafide)
-        rng.shuffle(spoof)
-        bonafide = bonafide[:SUBSET_PER_CLASS]
-        spoof = spoof[:SUBSET_PER_CLASS]
-        return bonafide + spoof
-
-    train_subset = _select_subset(train_items)
-    dev_subset = _select_subset(dev_items)
-
-    audio_train_root = Path(ASVSPOOF_ROOT) / 'ASVspoof2019_LA_train'
-    audio_dev_root = Path(ASVSPOOF_ROOT) / 'ASVspoof2019_LA_dev'
-
-    def _export_split(items, audio_root, out_root):
-        for file_id, label in items:
-            audio_path = _load_audio_path(audio_root, file_id)
-            if audio_path is None:
-                continue
-            class_dir = 'real' if label == 'bonafide' else 'fake'
-            output_path = out_root / class_dir / f"{file_id}.png"
-            if output_path.exists():
-                continue
-            _write_log_mel_png(audio_path, str(output_path))
-
-    _export_split(train_subset, audio_train_root, train_out)
-    _export_split(dev_subset, audio_dev_root, val_out)
-
-    return str(output_root)
 
 
 def plot_sample_grid(paths, labels, output_path, seed=3, per_class=3):
@@ -222,14 +78,15 @@ def plot_sample_grid(paths, labels, output_path, seed=3, per_class=3):
         picked = rng.choice(class_idx, size=min(per_class, len(class_idx)), replace=False)
         for col, idx in enumerate(picked):
             try:
-                img = load_img(paths[idx])
-                axes[row, col].imshow(img)
-                axes[row, col].axis('off')
+                image_bytes = tf.io.read_file(paths[idx])
+                image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
+                axes[row, col].imshow(image.numpy())
+                axes[row, col].axis("off")
             except Exception:
-                axes[row, col].axis('off')
+                axes[row, col].axis("off")
 
-    axes[0, 0].set_title('real')
-    axes[1, 0].set_title('fake')
+    axes[0, 0].set_title("real")
+    axes[1, 0].set_title("fake")
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -243,15 +100,13 @@ def collect_labeled_paths(root_dir, label_map, image_exts):
     file_paths = []
     labels = []
 
-    scanned = 0
-    for path in root_path.rglob('*'):
+    for path in root_path.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in image_exts:
             continue
 
-        path_parts_lower = {part.lower() for part in path.parts}
         matched_label = None
         for folder_name, label in label_map.items():
-            if folder_name.lower() in path_parts_lower:
+            if path.parent.name.lower() == folder_name.lower():
                 matched_label = label
                 break
 
@@ -259,61 +114,14 @@ def collect_labeled_paths(root_dir, label_map, image_exts):
             file_paths.append(str(path))
             labels.append(matched_label)
 
-        scanned += 1
-        if scanned % PRINT_EVERY == 0:
-            print(f"Scanned {scanned:,} files in {root_dir}...")
-
     if len(file_paths) == 0:
         raise ValueError(f"No labeled images found in: {root_dir}")
 
     return file_paths, np.asarray(labels)
 
 
-def scan_image_sizes(paths, max_samples=3000, seed=3):
-    if len(paths) == 0:
-        return {}
-
-    rng = np.random.default_rng(seed)
-    sample_count = min(max_samples, len(paths))
-    sampled_idx = rng.choice(len(paths), size=sample_count, replace=False)
-
-    size_counter = {}
-    for idx in sampled_idx:
-        try:
-            with load_img(paths[idx]) as image:
-                width, height = image.size
-            key = (height, width)
-            size_counter[key] = size_counter.get(key, 0) + 1
-        except Exception:
-            continue
-
-    return size_counter
-
-
-def resolve_input_shape(paths):
-    size_counter = scan_image_sizes(paths, max_samples=SIZE_SCAN_MAX_SAMPLES, seed=RANDOM_STATE)
-    print_stage_banner('Dataset Image Size Scan')
-
-    if not size_counter:
-        print('No image sizes scanned successfully. Falling back to fixed size.')
-        return (FIXED_INPUT_SIZE[0], FIXED_INPUT_SIZE[1], 3)
-
-    top_sizes = sorted(size_counter.items(), key=lambda item: item[1], reverse=True)[:5]
-    print('Top image sizes (height, width) from sampled files:')
-    for (h, w), count in top_sizes:
-        print(f"- {(h, w)} -> {count} samples")
-
-    most_common_size = top_sizes[0][0]
-    if INPUT_SIZE_MODE.lower() == 'auto':
-        chosen_size = most_common_size
-        print(f"Auto mode: selected most common size {chosen_size}")
-    else:
-        chosen_size = FIXED_INPUT_SIZE
-        print(f"Fixed mode: forcing resize to {chosen_size}")
-        if chosen_size != most_common_size:
-            print(f"Note: most common dataset size is {most_common_size}, but fixed size is {chosen_size}")
-
-    return (chosen_size[0], chosen_size[1], 3)
+def resolve_input_shape():
+    return (224, 224, 3)
 
 
 def _apply_spec_augment(image):
@@ -491,73 +299,25 @@ def build_balanced_eval_dataset(paths, labels, target_shape, batch_size, seed=3)
     return dataset, len(balanced_paths)
 
 
-def _sample_per_class(paths, labels, per_class, seed=3):
-    rng = np.random.default_rng(seed)
-    labels = np.asarray(labels)
-    paths = np.asarray(paths)
+def run_audio_pipeline(data_root=DEFAULT_DATA_ROOT):
+    train_dir = str(Path(data_root) / "train")
+    val_dir = str(Path(data_root) / "validation")
+    test_dir = str(Path(data_root) / "test")
 
-    real_idx = np.where(labels == 0)[0]
-    fake_idx = np.where(labels == 1)[0]
-    if len(real_idx) == 0 or len(fake_idx) == 0:
-        return paths.tolist(), labels
-
-    real_sel = rng.choice(real_idx, size=min(per_class, len(real_idx)), replace=False)
-    fake_sel = rng.choice(fake_idx, size=min(per_class, len(fake_idx)), replace=False)
-    idx = np.concatenate([real_sel, fake_sel])
-    rng.shuffle(idx)
-    return paths[idx].tolist(), labels[idx]
-
-
-def build_baseline_model(input_shape):
-    inputs = keras.Input(shape=input_shape)
-    x = layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
-    x = layers.MaxPooling2D()(x)
-    x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
-    x = layers.MaxPooling2D()(x)
-    x = layers.Conv2D(128, 3, padding='same', activation='relu')(x)
-    x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dropout(0.3)(x)
-    outputs = layers.Dense(1, activation='sigmoid')(x)
-    model = keras.Model(inputs=inputs, outputs=outputs)
-    model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss=keras.losses.BinaryCrossentropy(),
-        metrics=[
-            keras.metrics.BinaryAccuracy(name='accuracy'),
-            keras.metrics.Precision(name='precision'),
-            keras.metrics.Recall(name='recall'),
-            keras.metrics.AUC(name='auc'),
-        ],
-    )
-    return model
-
-
-def run_audio_pipeline():
-    if USE_ASVSPOOF_LA:
-        print_stage_banner('Preparing ASVspoof LA Subset')
-        data_root = _prepare_asvspoof_subset()
-        train_dir = str(Path(data_root) / 'train')
-        val_dir = str(Path(data_root) / 'validation')
-        test_dir = str(Path(data_root) / 'test')
-    else:
-        train_dir = TRAIN_DIR
-        val_dir = VAL_DIR
-        test_dir = TEST_DIR
-
-    print_stage_banner('Collecting Spectrogram Paths')
+    print_stage_banner("Collecting Spectrogram Paths")
     train_paths, train_labels = collect_labeled_paths(train_dir, LABELS, IMAGE_EXTS)
     val_paths, val_labels = collect_labeled_paths(val_dir, LABELS, IMAGE_EXTS)
     test_paths, test_labels = collect_labeled_paths(test_dir, LABELS, IMAGE_EXTS)
 
-    input_shape = resolve_input_shape(train_paths)
+    input_shape = resolve_input_shape()
 
-    print_binary_counts('Train (before balancing)', train_labels)
-    print_binary_counts('Validation (before balancing)', val_labels)
-    print_binary_counts('Test (before balancing)', test_labels)
+    print_binary_counts("Train (before balancing)", train_labels)
+    print_binary_counts("Validation (before balancing)", val_labels)
+    print_binary_counts("Test (before balancing)", test_labels)
     print_label_samples(np.asarray(train_paths), train_labels, sample_count=3, seed=RANDOM_STATE)
     plot_sample_grid(train_paths, train_labels, f"{MODEL_NAME}-samples.png", seed=RANDOM_STATE)
 
-    print_stage_banner('Building tf.data Pipelines')
+    print_stage_banner("Building tf.data Pipelines")
     train_ds = build_balanced_train_dataset(
         train_paths,
         train_labels,
@@ -574,48 +334,12 @@ def run_audio_pipeline():
     )
     test_ds = build_tf_dataset(test_paths, test_labels, input_shape, BATCH_SIZE)
 
-    print_stage_banner('Balanced Batch Sanity Check')
+    print_stage_banner("Balanced Batch Sanity Check")
     inspect_batch_balance(train_ds, num_batches=3)
 
     steps_per_epoch = compute_steps_per_epoch(train_labels, BATCH_SIZE)
-    train_batches = steps_per_epoch
     val_batches = (val_count + BATCH_SIZE - 1) // BATCH_SIZE
-    test_batches = (len(test_paths) + BATCH_SIZE - 1) // BATCH_SIZE
-    print(f"Streaming dataset configured with input_shape: {input_shape}")
-    print(f"Train batches: {train_batches}, Validation batches: {val_batches}, Test batches: {test_batches}")
-
-    if USE_BASELINE:
-        print_stage_banner('Baseline Sanity Run')
-        train_paths_small, train_labels_small = _sample_per_class(
-            train_paths, train_labels, BASELINE_SAMPLES_PER_CLASS, seed=RANDOM_STATE
-        )
-        val_paths_small, val_labels_small = _sample_per_class(
-            val_paths, val_labels, BASELINE_SAMPLES_PER_CLASS // 2, seed=RANDOM_STATE + 1
-        )
-
-        train_ds_small = build_tf_dataset(
-            train_paths_small,
-            train_labels_small,
-            input_shape,
-            BATCH_SIZE,
-            shuffle=True,
-            seed=RANDOM_STATE,
-            augment=False,
-        )
-        val_ds_small = build_tf_dataset(
-            val_paths_small,
-            val_labels_small,
-            input_shape,
-            BATCH_SIZE,
-        )
-
-        baseline_model = build_baseline_model(input_shape)
-        baseline_model.summary()
-        baseline_model.fit(
-            train_ds_small,
-            epochs=BASELINE_EPOCHS,
-            validation_data=val_ds_small,
-        )
+    print(f"Train batches: {steps_per_epoch}, Validation batches: {val_batches}")
 
     model = build_audio_model(
         input_shape=input_shape,
@@ -631,56 +355,46 @@ def run_audio_pipeline():
         learning_rate=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         label_smoothing=LABEL_SMOOTHING,
-        output_activation='sigmoid',
+        output_activation="sigmoid",
     )
-
-    if USE_FOCAL_LOSS:
-        loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-            gamma=FOCAL_GAMMA,
-            alpha=FOCAL_ALPHA,
-        )
-    else:
-        loss_fn = tf.keras.losses.BinaryCrossentropy()
 
     model.compile(
         optimizer=keras.optimizers.AdamW(
             learning_rate=LEARNING_RATE,
             weight_decay=WEIGHT_DECAY,
         ),
-        loss=loss_fn,
+        loss=keras.losses.BinaryCrossentropy(),
         metrics=[
-            keras.metrics.BinaryAccuracy(name='accuracy'),
-            keras.metrics.Precision(name='precision'),
-            keras.metrics.Recall(name='recall'),
-            keras.metrics.AUC(name='auc'),
+            keras.metrics.BinaryAccuracy(name="accuracy"),
+            keras.metrics.Precision(name="precision"),
+            keras.metrics.Recall(name="recall"),
+            keras.metrics.AUC(name="auc"),
         ],
     )
 
-    model.summary()
-
     early_stopping = EarlyStopping(
-        monitor='val_auc',
-        mode='max',
+        monitor="val_auc",
+        mode="max",
         patience=5,
         verbose=1,
         restore_best_weights=True,
     )
     model_checkpoint = ModelCheckpoint(
         f"{MODEL_NAME}-best.keras",
-        monitor='val_auc',
-        mode='max',
+        monitor="val_auc",
+        mode="max",
         save_best_only=True,
         verbose=1,
     )
     reduce_lr = ReduceLROnPlateau(
-        monitor='val_loss',
+        monitor="val_loss",
         factor=0.5,
         patience=2,
         min_lr=1e-6,
         verbose=1,
     )
 
-    print_stage_banner('Training Started')
+    print_stage_banner("Training Started")
     history = model.fit(
         train_ds,
         epochs=EPOCHS,
@@ -690,49 +404,38 @@ def run_audio_pipeline():
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
     )
 
-    best_epoch = int(np.argmax(history.history['val_accuracy']) + 1)
-    best_val_acc = float(np.max(history.history['val_accuracy']))
-    best_val_loss = float(np.min(history.history['val_loss']))
+    print_stage_banner("Training Summary")
+    print(f"Best val_auc: {np.max(history.history['val_auc']):.4f}")
 
-    print_stage_banner('Training Summary')
-    print(f"Best epoch: {best_epoch}")
-    print(f"Best val_accuracy: {best_val_acc:.4f}")
-    print(f"Best val_loss: {best_val_loss:.4f}")
-
+    print_stage_banner("Test Evaluation")
     test_results = model.evaluate(test_ds, verbose=1)
-    test_loss = test_results[0]
-    test_acc = test_results[1]
-    test_auc = test_results[4] if len(test_results) > 4 else None
-    print(f"Test loss: {test_loss:.4f}")
-    print(f"Test accuracy: {test_acc:.4f}")
-    if test_auc is not None:
-        print(f"Test AUC: {test_auc:.4f}")
+    print(f"Test loss: {test_results[0]:.4f}")
+    print(f"Test accuracy: {test_results[1]:.4f}")
+    print(f"Test precision: {test_results[2]:.4f}")
+    print(f"Test recall: {test_results[3]:.4f}")
+    print(f"Test AUC: {test_results[4]:.4f}")
 
-    print_stage_banner('Label Samples (Repeat)')
-    print_label_samples(np.asarray(train_paths), train_labels, sample_count=3, seed=RANDOM_STATE)
+    plt.plot(history.history["accuracy"], label="train_accuracy")
+    plt.plot(history.history["val_accuracy"], label="val_accuracy")
+    plt.title("Model Accuracy")
+    plt.xlabel("Epochs")
+    plt.legend(loc="upper left")
+    plt.savefig(f"{MODEL_NAME}-acc.png")
 
-    final_model_path = f"{MODEL_NAME}.keras"
-    model.save(final_model_path)
-    print(f"model saved: {final_model_path}")
-
-    plt.plot(history.history['accuracy'], label='train_accuracy')
-    plt.plot(history.history['val_accuracy'], label='val_accuracy')
-    plt.title('Model Accuracy')
-    plt.xlabel('Epochs')
-    plt.legend(loc='upper left')
-    plt.savefig(f'{MODEL_NAME}-acc.png')
-
-    plt.plot(history.history['loss'], label='train_loss')
-    plt.plot(history.history['val_loss'], label='val_loss')
-    plt.title('Model Loss')
-    plt.xlabel('Epochs')
-    plt.legend(loc='upper left')
-    plt.savefig(f'{MODEL_NAME}-loss.png')
+    plt.plot(history.history["loss"], label="train_loss")
+    plt.plot(history.history["val_loss"], label="val_loss")
+    plt.title("Model Loss")
+    plt.xlabel("Epochs")
+    plt.legend(loc="upper left")
+    plt.savefig(f"{MODEL_NAME}-loss.png")
 
 
 def main():
-    run_audio_pipeline()
+    parser = argparse.ArgumentParser(description="Train on FakeAVCeleb audio PNGs")
+    parser.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    args = parser.parse_args()
+    run_audio_pipeline(args.data_root)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

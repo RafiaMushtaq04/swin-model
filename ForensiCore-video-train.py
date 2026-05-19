@@ -1,14 +1,16 @@
-import matplotlib.pyplot as plt
-import numpy as np
+import argparse
 from collections import Counter
+from pathlib import Path
+
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.preprocessing.image import load_img
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
-from pathlib import Path
+from tensorflow.keras.preprocessing.image import load_img
+
 from ForensiCore import build_video_model
 
-MODEL_NAME = 'ForensiCore-Video'
+MODEL_NAME = "ForensiCore-FakeAV-Video"
 NUM_CLASSES = 1
 PATCH_SIZE = (3, 3)
 EMBED_DIM = 64
@@ -18,9 +20,6 @@ SHIFT_SIZE = 1
 NUM_MLP = 256
 QKV_BIAS = True
 DROPOUT_RATE = 0.15
-TRAIN_SPLIT = 0.7
-VALIDATION_SPLIT = 0.15
-TEST_SPLIT = 0.15
 LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 2e-4
 LABEL_SMOOTHING = 0.0
@@ -36,35 +35,13 @@ CONTRAST_RANGE = (0.8, 1.2)
 JPEG_QUALITY_RANGE = (70, 100)
 BLUR_PROB = 0.2
 
-# Input size control
-# - 'fixed': always resize to FIXED_INPUT_SIZE
-# - 'auto': scan dataset and choose most common image size
-INPUT_SIZE_MODE = 'fixed'
+INPUT_SIZE_MODE = "fixed"
 FIXED_INPUT_SIZE = (224, 224)
 SIZE_SCAN_MAX_SAMPLES = 3000
 
-FFPP_FRAMES_ROOT = '/kaggle/input/datasets/muhammadqaiser1921/faceforenscis/ffpp_binary_frames'
-DEEPFAKE_FRAMES_ROOT = '/kaggle/input/datasets/aryansingh16/deepfake-dataset/real_vs_fake/real-vs-fake'
-
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
-
-# Binary mapping
-FFPP_LABELS = {'0': 0, '1': 1}
-DEEPFAKE_LABELS = {'real': 0, 'fake': 1}
-
-
-def _match_label(path, label_map):
-    for part in path.parts:
-        for folder_name, label in label_map.items():
-            if part.lower() == folder_name.lower():
-                return label
-    return None
-
-
-def _group_id_from_path(path):
-    if len(path.parents) >= 2:
-        return f"{path.parents[1].name}/{path.parent.name}"
-    return path.parent.name
+DEFAULT_DATA_ROOT = "/kaggle/working/fakeav_video_frames"
+IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+LABELS = {"real": 0, "fake": 1}
 
 
 def collect_labeled_paths(root_dir, label_map, image_exts):
@@ -76,11 +53,15 @@ def collect_labeled_paths(root_dir, label_map, image_exts):
     file_paths = []
     labels = []
 
-    for path in root_path.rglob('*'):
+    for path in root_path.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in image_exts:
             continue
 
-        matched_label = _match_label(path, label_map)
+        matched_label = None
+        for folder_name, label in label_map.items():
+            if path.parent.name.lower() == folder_name.lower():
+                matched_label = label
+                break
 
         if matched_label is not None:
             file_paths.append(str(path))
@@ -103,7 +84,7 @@ def print_stage_banner(title):
 
 
 def print_run_config(input_shape):
-    print_stage_banner('Run Configuration')
+    print_stage_banner("Run Configuration")
     print(f"MODEL_NAME: {MODEL_NAME}")
     print(f"input_shape: {input_shape}")
     print(f"NUM_CLASSES: {NUM_CLASSES}")
@@ -111,7 +92,6 @@ def print_run_config(input_shape):
     print(f"EMBED_DIM: {EMBED_DIM}, NUM_HEADS: {NUM_HEADS}, NUM_MLP: {NUM_MLP}")
     print(f"WINDOW_SIZE: {WINDOW_SIZE}, SHIFT_SIZE: {SHIFT_SIZE}")
     print(f"DROPOUT_RATE: {DROPOUT_RATE}, LEARNING_RATE: {LEARNING_RATE}, WEIGHT_DECAY: {WEIGHT_DECAY}")
-    print(f"TRAIN/VAL/TEST SPLIT: {TRAIN_SPLIT}/{VALIDATION_SPLIT}/{TEST_SPLIT}")
     print(f"BATCH_SIZE: {BATCH_SIZE}, EPOCHS: {EPOCHS}, RANDOM_STATE: {RANDOM_STATE}")
     print(f"INPUT_SIZE_MODE: {INPUT_SIZE_MODE}, FIXED_INPUT_SIZE: {FIXED_INPUT_SIZE}")
 
@@ -138,18 +118,18 @@ def scan_image_sizes(paths, max_samples=3000, seed=3):
 
 def resolve_input_shape(paths):
     size_counter = scan_image_sizes(paths, max_samples=SIZE_SCAN_MAX_SAMPLES, seed=RANDOM_STATE)
-    print_stage_banner('Dataset Image Size Scan')
+    print_stage_banner("Dataset Image Size Scan")
     if not size_counter:
-        print('No image sizes could be scanned. Falling back to FIXED_INPUT_SIZE.')
+        print("No image sizes could be scanned. Falling back to FIXED_INPUT_SIZE.")
         return (FIXED_INPUT_SIZE[0], FIXED_INPUT_SIZE[1], 3)
 
     top_sizes = size_counter.most_common(5)
-    print('Top image sizes (height, width) from sampled files:')
+    print("Top image sizes (height, width) from sampled files:")
     for (h, w), count in top_sizes:
         print(f"- {(h, w)} -> {count} samples")
 
     most_common_size = top_sizes[0][0]
-    if INPUT_SIZE_MODE.lower() == 'auto':
+    if INPUT_SIZE_MODE.lower() == "auto":
         chosen_size = most_common_size
         print(f"Auto mode: selected most common size {chosen_size}")
     else:
@@ -167,7 +147,7 @@ def compute_class_weight(labels):
     fake_count = int(np.sum(labels == 1))
     total = real_count + fake_count
     if real_count == 0 or fake_count == 0:
-        raise ValueError('Cannot compute class weights: one class has zero samples.')
+        raise ValueError("Cannot compute class weights: one class has zero samples.")
 
     weight_for_real = total / (2.0 * real_count)
     weight_for_fake = total / (2.0 * fake_count)
@@ -181,7 +161,7 @@ def build_balanced_eval_dataset(paths, labels, target_shape, batch_size, seed=3)
     real_idx = np.where(labels == 0)[0]
     fake_idx = np.where(labels == 1)[0]
     if len(real_idx) == 0 or len(fake_idx) == 0:
-        raise ValueError('Balanced evaluation requires both classes in the split.')
+        raise ValueError("Balanced evaluation requires both classes in the split.")
 
     rng = np.random.default_rng(seed)
     per_class = min(len(real_idx), len(fake_idx))
@@ -203,117 +183,6 @@ def build_balanced_eval_dataset(paths, labels, target_shape, batch_size, seed=3)
     return dataset, len(balanced_paths)
 
 
-def split_by_group(paths, labels, train_split=0.7, val_split=0.15, seed=3):
-    labels = np.asarray(labels)
-    if not np.isclose(train_split + val_split + TEST_SPLIT, 1.0):
-        raise ValueError('Train/validation/test splits must sum to 1.0')
-
-    rng = np.random.default_rng(seed)
-    group_map = {}
-    for idx, path_str in enumerate(paths):
-        path = Path(path_str)
-        group_id = _group_id_from_path(path)
-        group_map.setdefault(group_id, []).append(idx)
-
-    group_ids = list(group_map.keys())
-    group_labels = {}
-    for gid in group_ids:
-        idxs = group_map[gid]
-        gid_labels = set(labels[idxs])
-        if len(gid_labels) != 1:
-            raise ValueError(f"Group '{gid}' has mixed labels: {gid_labels}")
-        group_labels[gid] = next(iter(gid_labels))
-
-    real_groups = [gid for gid in group_ids if group_labels[gid] == 0]
-    fake_groups = [gid for gid in group_ids if group_labels[gid] == 1]
-
-    rng.shuffle(real_groups)
-    rng.shuffle(fake_groups)
-
-    def split_groups(groups):
-        n_train = int(len(groups) * train_split)
-        n_val = int(len(groups) * val_split)
-        n_test = len(groups) - n_train - n_val
-        train_g = groups[:n_train]
-        val_g = groups[n_train:n_train + n_val]
-        test_g = groups[n_train + n_val:n_train + n_val + n_test]
-        return train_g, val_g, test_g
-
-    real_train, real_val, real_test = split_groups(real_groups)
-    fake_train, fake_val, fake_test = split_groups(fake_groups)
-
-    train_groups = real_train + fake_train
-    val_groups = real_val + fake_val
-    test_groups = real_test + fake_test
-
-    rng.shuffle(train_groups)
-    rng.shuffle(val_groups)
-    rng.shuffle(test_groups)
-
-    def expand_groups(groups):
-        indices = []
-        for gid in groups:
-            indices.extend(group_map[gid])
-        return indices
-
-    train_idx = expand_groups(train_groups)
-    val_idx = expand_groups(val_groups)
-    test_idx = expand_groups(test_groups)
-
-    paths = np.asarray(paths)
-    return (
-        paths[train_idx].tolist(), labels[train_idx],
-        paths[val_idx].tolist(), labels[val_idx],
-        paths[test_idx].tolist(), labels[test_idx],
-    )
-
-
-def split_stratified(paths, labels, train_split=0.7, val_split=0.15, seed=3):
-    labels = np.asarray(labels)
-    if not np.isclose(train_split + val_split + TEST_SPLIT, 1.0):
-        raise ValueError('Train/validation/test splits must sum to 1.0')
-
-    rng = np.random.default_rng(seed)
-    real_idx = np.where(labels == 0)[0]
-    fake_idx = np.where(labels == 1)[0]
-    if len(real_idx) == 0 or len(fake_idx) == 0:
-        raise ValueError('Cannot split data because one class is empty.')
-
-    rng.shuffle(real_idx)
-    rng.shuffle(fake_idx)
-
-    def split_counts(class_count):
-        n_train = int(class_count * train_split)
-        n_val = int(class_count * val_split)
-        n_test = class_count - n_train - n_val
-        return n_train, n_val, n_test
-
-    def class_split(class_indices):
-        n_train, n_val, n_test = split_counts(len(class_indices))
-        train_part = class_indices[:n_train]
-        val_part = class_indices[n_train:n_train + n_val]
-        test_part = class_indices[n_train + n_val:n_train + n_val + n_test]
-        return train_part, val_part, test_part
-
-    real_train, real_val, real_test = class_split(real_idx)
-    fake_train, fake_val, fake_test = class_split(fake_idx)
-
-    train_idx = np.concatenate([real_train, fake_train])
-    val_idx = np.concatenate([real_val, fake_val])
-    test_idx = np.concatenate([real_test, fake_test])
-
-    rng.shuffle(train_idx)
-    rng.shuffle(val_idx)
-    rng.shuffle(test_idx)
-
-    paths = np.asarray(paths)
-    return (
-        paths[train_idx].tolist(), labels[train_idx],
-        paths[val_idx].tolist(), labels[val_idx],
-        paths[test_idx].tolist(), labels[test_idx],
-    )
-
-
 def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, seed=3):
     target_height, target_width = target_shape[:2]
     paths = np.asarray(paths, dtype=str)
@@ -328,7 +197,7 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
         )
 
     def _apply_blur(image):
-        return tf.nn.avg_pool2d(image[None, ...], ksize=3, strides=1, padding='SAME')[0]
+        return tf.nn.avg_pool2d(image[None, ...], ksize=3, strides=1, padding="SAME")[0]
 
     def _decode_and_preprocess(path, label):
         image_bytes = tf.io.read_file(path)
@@ -364,69 +233,62 @@ def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, see
     return dataset
 
 
-def run_video_pipeline():
-    ffpp_paths, ffpp_labels = collect_labeled_paths(FFPP_FRAMES_ROOT, FFPP_LABELS, IMAGE_EXTS)
-    deepfake_paths, deepfake_labels = collect_labeled_paths(DEEPFAKE_FRAMES_ROOT, DEEPFAKE_LABELS, IMAGE_EXTS)
-
-    all_paths = ffpp_paths + deepfake_paths
-    all_labels = np.asarray(ffpp_labels + deepfake_labels)
-
-    if len(all_paths) == 0:
-        raise ValueError('No images found. Check dataset roots and folder mappings.')
-
-    input_shape = resolve_input_shape(all_paths)
-    print_run_config(input_shape)
-
-    print_binary_counts('Collected (before balancing)', all_labels)
-
-    class_weight = compute_class_weight(all_labels)
-    print(f"Class weights: {class_weight}")
-
-    (
-        train_paths, y_train_labels,
-        val_paths, y_val_labels,
-        test_paths, y_test_labels,
-    ) = split_by_group(
-        all_paths,
-        all_labels,
-        train_split=TRAIN_SPLIT,
-        val_split=VALIDATION_SPLIT,
-        seed=RANDOM_STATE,
+def run_video_pipeline(data_root=DEFAULT_DATA_ROOT):
+    train_paths, train_labels = collect_labeled_paths(
+        Path(data_root) / "train", LABELS, IMAGE_EXTS
+    )
+    val_paths, val_labels = collect_labeled_paths(
+        Path(data_root) / "validation", LABELS, IMAGE_EXTS
+    )
+    test_paths, test_labels = collect_labeled_paths(
+        Path(data_root) / "test", LABELS, IMAGE_EXTS
     )
 
-    print_binary_counts('Train split', y_train_labels)
-    print_binary_counts('Validation split', y_val_labels)
-    print_binary_counts('Test split', y_test_labels)
-    print(f"Total samples used: {len(all_labels)}")
-    print(f"Split totals -> train: {len(train_paths)}, val: {len(val_paths)}, test: {len(test_paths)}")
+    if len(train_paths) == 0:
+        raise ValueError("No images found. Check dataset roots and folder mappings.")
 
-    print_stage_banner('Building tf.data Pipelines')
+    input_shape = resolve_input_shape(train_paths)
+    print_run_config(input_shape)
+
+    print_binary_counts("Train split", train_labels)
+    print_binary_counts("Validation split", val_labels)
+    print_binary_counts("Test split", test_labels)
+
+    class_weight = compute_class_weight(train_labels)
+    print(f"Class weights: {class_weight}")
+
+    print_stage_banner("Building tf.data Pipelines")
     train_ds = build_tf_dataset(
         train_paths,
-        y_train_labels,
+        train_labels,
         input_shape,
         BATCH_SIZE,
         shuffle=True,
         seed=RANDOM_STATE,
     )
+
     val_ds, val_count = build_balanced_eval_dataset(
         val_paths,
-        y_val_labels,
+        val_labels,
         input_shape,
         BATCH_SIZE,
         seed=RANDOM_STATE + 1,
     )
-    test_ds = build_tf_dataset(test_paths, y_test_labels, input_shape, BATCH_SIZE)
 
-    train_batches = (len(train_paths) + BATCH_SIZE - 1) // BATCH_SIZE
+    test_ds = build_tf_dataset(
+        test_paths,
+        test_labels,
+        input_shape,
+        BATCH_SIZE,
+        shuffle=False,
+    )
+
+    train_steps = (len(train_paths) + BATCH_SIZE - 1) // BATCH_SIZE
     val_batches = (val_count + BATCH_SIZE - 1) // BATCH_SIZE
-    test_batches = (len(test_paths) + BATCH_SIZE - 1) // BATCH_SIZE
-    print(f"Streaming dataset configured with input_shape: {input_shape}")
-    print(f"Train batches: {train_batches}, Validation batches: {val_batches}, Test batches: {test_batches}")
 
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=LEARNING_RATE,
-        decay_steps=max(train_batches * EPOCHS, 1),
+        decay_steps=max(train_steps * EPOCHS, 1),
         alpha=0.1,
     )
 
@@ -444,83 +306,74 @@ def run_video_pipeline():
         learning_rate=lr_schedule,
         weight_decay=WEIGHT_DECAY,
         label_smoothing=LABEL_SMOOTHING,
-        output_activation='sigmoid',
+        output_activation="sigmoid",
     )
 
-    model.summary()
+    model.compile(
+        optimizer=keras.optimizers.AdamW(
+            learning_rate=lr_schedule,
+            weight_decay=WEIGHT_DECAY,
+        ),
+        loss=keras.losses.BinaryCrossentropy(),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name="accuracy"),
+            keras.metrics.Precision(name="precision"),
+            keras.metrics.Recall(name="recall"),
+            keras.metrics.AUC(name="auc"),
+        ],
+    )
 
-    early_stopping = EarlyStopping(monitor='val_auc',
-                                   mode='max',
-                                   patience=5,
-                                   verbose=1, restore_best_weights=True)
+    early_stopping = EarlyStopping(
+        monitor="val_auc",
+        mode="max",
+        patience=5,
+        verbose=1,
+        restore_best_weights=True,
+    )
     model_checkpoint = ModelCheckpoint(
         f"{MODEL_NAME}-best.keras",
-        monitor='val_auc',
-        mode='max',
+        monitor="val_auc",
+        mode="max",
         save_best_only=True,
         verbose=1,
     )
     reduce_lr = ReduceLROnPlateau(
-        monitor='val_loss',
+        monitor="val_loss",
         factor=0.5,
         patience=2,
         min_lr=1e-6,
         verbose=1,
     )
 
-    print_stage_banner('Training Started')
+    print_stage_banner("Training Started")
     history = model.fit(
         train_ds,
         epochs=EPOCHS,
+        steps_per_epoch=train_steps,
         validation_data=val_ds,
         validation_steps=val_batches,
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
         class_weight=class_weight,
     )
 
-    best_epoch = int(np.argmax(history.history['val_accuracy']) + 1)
-    best_val_acc = float(np.max(history.history['val_accuracy']))
-    best_val_loss = float(np.min(history.history['val_loss']))
-    print_stage_banner('Training Summary')
-    print(f"Best epoch: {best_epoch}")
-    print(f"Best val_accuracy: {best_val_acc:.4f}")
-    print(f"Best val_loss: {best_val_loss:.4f}")
+    print_stage_banner("Training Summary")
+    print(f"Best val_auc: {np.max(history.history['val_auc']):.4f}")
 
+    print_stage_banner("Test Evaluation")
     test_results = model.evaluate(test_ds, verbose=1)
-    test_loss = test_results[0]
-    test_acc = test_results[1]
-    test_auc = test_results[4] if len(test_results) > 4 else None
-    print(f"Test loss: {test_loss:.4f}")
-    print(f"Test accuracy: {test_acc:.4f}")
-    if test_auc is not None:
-        print(f"Test AUC: {test_auc:.4f}")
-
-    final_model_path = f"{MODEL_NAME}.keras"
-    model.save(final_model_path)
-    print(f"model saved : {final_model_path}")
-
-    plt.plot(history.history['accuracy'], label='train_accuracy')
-    plt.plot(history.history['val_accuracy'], label='val_accuracy')
-    plt.title('Model Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.legend(loc='upper left')
-    plt.savefig(f'{MODEL_NAME}-acc.png')
-
-    plt.plot(history.history['loss'], label='train_loss')
-    plt.plot(history.history['val_loss'], label='val_loss')
-    plt.title('Model Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend(loc='upper left')
-    plt.savefig(f'{MODEL_NAME}-loss.png')
+    print(f"Test loss: {test_results[0]:.4f}")
+    print(f"Test accuracy: {test_results[1]:.4f}")
+    print(f"Test precision: {test_results[2]:.4f}")
+    print(f"Test recall: {test_results[3]:.4f}")
+    print(f"Test AUC: {test_results[4]:.4f}")
 
 
 def main():
-    run_video_pipeline()
+    parser = argparse.ArgumentParser(description="Train on FakeAVCeleb video frames")
+    parser.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    args = parser.parse_args()
+    run_video_pipeline(args.data_root)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
-

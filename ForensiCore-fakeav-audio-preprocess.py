@@ -220,6 +220,12 @@ def main():
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--test-split", type=float, default=0.1)
     parser.add_argument("--max-videos-per-class", type=int, default=0)
+    parser.add_argument(
+        "--split",
+        choices=["all", "train", "validation", "test"],
+        default="all",
+        help="Which split to preprocess (default: all)",
+    )
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--seed", type=int, default=3)
     args = parser.parse_args()
@@ -247,12 +253,15 @@ def main():
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    print("Preprocessing train split...")
-    process_split(train_items, "train", out_root, args.max_videos_per_class, args.seed)
-    print("Preprocessing validation split...")
-    process_split(val_items, "validation", out_root, args.max_videos_per_class, args.seed + 1)
-    print("Preprocessing test split...")
-    process_split(test_items, "test", out_root, args.max_videos_per_class, args.seed + 2)
+    if args.split in {"all", "train"}:
+        print("Preprocessing train split...")
+        process_split(train_items, "train", out_root, args.max_videos_per_class, args.seed)
+    if args.split in {"all", "validation"}:
+        print("Preprocessing validation split...")
+        process_split(val_items, "validation", out_root, args.max_videos_per_class, args.seed + 1)
+    if args.split in {"all", "test"}:
+        print("Preprocessing test split...")
+        process_split(test_items, "test", out_root, args.max_videos_per_class, args.seed + 2)
 
     print("Preprocessing complete.")
     print(f"Output dir: {out_root}")
